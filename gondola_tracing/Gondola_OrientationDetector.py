@@ -3,9 +3,11 @@
 # Original File1 collector (the run that filled most bays).
 # Version 2026-10-05p-bay-fit
 #
-# Only orientation is corrected after collect:
-#   leftover named blocks + modelspace TEXT, MATCH_DIST 1500,
-#   family XY = SIZE label. Neighbour-run writes revit_angle.
+# Collect is unchanged: leftover named blocks + modelspace TEXT.
+# Position and orientation are corrected after collect:
+#   SIZE+TYPE paired mutual-nearest, family XY = bay centre, then
+#   each bay is snapped onto the gondola rectangle drawn in the CAD.
+#   Neighbour-run voting only fills in bays with no rectangle.
 #
 # Purpose:
 #   1. Read gondola labels from a DXF file.

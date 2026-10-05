@@ -12,24 +12,26 @@
 #
 # IMPORTANT ORIENTATION CHANGE
 # ----------------------------
-# The JSON should ideally contain:
+# Angles come from the detector only:
 #
-#   "orientation": "HORIZONTAL"
-#   "angle": 90.0
+#   "orientation_angle" - long axis of the bay (0 = +X, 90 = +Y)
+#   "revit_angle" / "angle" - the same line turned 90 degrees
 #
-# or:
+# DXF text "rotation" is ignored. It is almost always 0, and reading
+# it is what put every family at 0 degrees.
 #
-#   "orientation": "VERTICAL"
-#   "angle": 0.0
+# Each family is then aligned by measuring its placed bounding box:
+# it is turned onto the bay axis about the footprint centre, and the
+# footprint centre is moved onto the bay centre. These families are
+# not centred on their origin, so rotating about the insertion point
+# swung the body off its bay.
 #
-# If "angle" exists, the script uses the ACTUAL angle from the DXF.
-# It no longer assumes that every horizontal gondola should simply
-# be rotated 90 degrees.
+# "bay_length" / "bay_depth" are the sides of the gondola rectangle
+# the detector fitted in the CAD. When present they decide which
+# quarter turn lands the footprint on the bay, and the report shows
+# how far the footprint still misses it.
 #
-# The angle is assumed to be DEGREES measured counter-clockwise
-# from the Revit X axis.
-#
-# If the JSON does not contain "angle", the script falls back to
+# If no angle is in the JSON, the script falls back to
 # HORIZONTAL = 90 degrees and VERTICAL = 0 degrees.
 
 
