@@ -39,7 +39,8 @@ from Autodesk.Revit.DB import (
     BuiltInParameter,
     OverrideGraphicSettings,
     Color,
-    ImportInstance
+    ImportInstance,
+    ElementId
 )
 
 from Autodesk.Revit.DB.Structure import StructuralType
@@ -52,12 +53,12 @@ from RevitServices.Persistence import DocumentManager
 
 JSON_PATH = r"C:\Users\msharan\OneDrive - Kmart Australia Limited\Desktop\Stores Foundry\Tracing\json\gondola_data_Marrickville_New2.json"
 
-LEVEL_NAME = "00-GROUND"
-
-# Never switch LEVEL_NAME to whatever plan view Dynamo happened to find
-# (overlay views named "EXISTING & PROPOSED" previously stole the
-# proposed selling-floor level).
-ALLOW_VIEW_LEVEL_OVERRIDE = False
+# This project does not have a level named 00-GROUND. Host on the
+# Existing Conditions Ground plan the user is looking at.
+# Leave TARGET_VIEW_NAME as a fallback when Dynamo is run from another view.
+USE_ACTIVE_PLAN_VIEW = True
+TARGET_VIEW_NAME = "1.0 EXISTING CONDITIONS - GROUND"
+LEVEL_NAME = "1.0 EXISTING CONDITIONS - GROUND"
 
 # Partial CAD import name. Prefer the existing-conditions link.
 CAD_LINK_NAME = "Existing Conditions"
@@ -775,6 +776,12 @@ doc = DocumentManager.Instance.CurrentDBDocument
 if doc is None:
     raise Exception("Could not obtain current Revit document.")
 
+uidoc = None
+try:
+    uidoc = DocumentManager.Instance.CurrentUIApplication.ActiveUIDocument
+except Exception:
+    uidoc = None
+
 
 # ===========================================================================
 # FIND CAD IMPORT
@@ -947,8 +954,12 @@ for g in gondolas:
 
 
 # ===========================================================================
-# FIND LEVEL
+# FIND EXISTING-CONDITIONS GROUND VIEW + LEVEL
 # ===========================================================================
+#
+# Previous runs hosted on 2.0 PROPOSED because an overlay view name
+# contained "existing". The user is looking at
+# "1.0 EXISTING CONDITIONS - GROUND" and saw an empty CAD underlay.
 
 all_levels = list(FilteredElementCollector(doc).OfClass(Level))
 level_map = {}
@@ -959,83 +970,132 @@ for lv in all_levels:
     except Exception:
         pass
 
-target_level = level_map.get(LEVEL_NAME)
+all_views = list(FilteredElementCollector(doc).OfClass(ViewPlan))
+target_view = None
+target_level = None
+view_source = ""
+
+
+def _view_ok(view):
+    if view is None:
+        return False
+    try:
+        if view.IsTemplate:
+            return False
+    except Exception:
+        pass
+    try:
+        return view.GenLevel is not None
+    except Exception:
+        return False
+
+
+def _name_score(name):
+    low = str(name or "").lower()
+    score = 0
+    if "overlay" in low:
+        score -= 80
+    if "proposed" in low:
+        score -= 50
+    if "mezzanine" in low or "mezz" in low:
+        score -= 30
+    if "existing" in low:
+        score += 40
+    if "condition" in low:
+        score += 25
+    if "ground" in low:
+        score += 25
+    if "1.0" in low:
+        score += 20
+    return score
+
+
+# 1) The floor plan the user currently has open.
+if USE_ACTIVE_PLAN_VIEW and uidoc is not None:
+    try:
+        active = uidoc.ActiveView
+        if isinstance(active, ViewPlan) and _view_ok(active):
+            if _name_score(active.Name) >= 40:
+                target_view = active
+                target_level = active.GenLevel
+                view_source = "active existing/ground view"
+            else:
+                view_source = "active view skipped ({})".format(active.Name)
+    except Exception:
+        target_view = None
+        target_level = None
+
+# 2) Named Existing Conditions Ground plan (screenshot view).
+if target_view is None:
+    wanted = TARGET_VIEW_NAME.strip().lower()
+    for v in all_views:
+        try:
+            if not _view_ok(v):
+                continue
+            if str(v.Name).strip().lower() == wanted:
+                target_view = v
+                target_level = v.GenLevel
+                view_source = "TARGET_VIEW_NAME exact"
+                break
+        except Exception:
+            pass
+
+if target_view is None:
+    ranked = []
+    for v in all_views:
+        try:
+            if not _view_ok(v):
+                continue
+            ranked.append((_name_score(v.Name), v))
+        except Exception:
+            pass
+    ranked.sort(key=lambda row: row[0], reverse=True)
+    if ranked and ranked[0][0] >= 40:
+        target_view = ranked[0][1]
+        target_level = target_view.GenLevel
+        view_source = "best existing/ground plan view"
+
+# 3) Level by name, then a view on that level.
 if target_level is None:
-    for name, lv in level_map.items():
-        if name.strip().lower() == LEVEL_NAME.strip().lower():
-            target_level = lv
-            break
+    target_level = level_map.get(LEVEL_NAME)
+    if target_level is None:
+        for name, lv in level_map.items():
+            if name.strip().lower() == LEVEL_NAME.strip().lower():
+                target_level = lv
+                break
+    if target_level is None:
+        ranked_lv = []
+        for name, lv in level_map.items():
+            ranked_lv.append((_name_score(name), lv))
+        ranked_lv.sort(key=lambda row: row[0], reverse=True)
+        if ranked_lv and ranked_lv[0][0] >= 40:
+            target_level = ranked_lv[0][1]
 
 if target_level is None:
     raise Exception(
-        "Level '{}' not found.\n\nAvailable levels:\n{}".format(
-            LEVEL_NAME,
-            "\n".join("  " + n for n in sorted(level_map.keys())),
+        "Could not find the Existing Conditions Ground level.\n\n"
+        "Available levels:\n{}".format(
+            "\n".join("  " + n for n in sorted(level_map.keys()))
         )
     )
 
-
-# ===========================================================================
-# FIND EXISTING CONDITIONS VIEW
-# ===========================================================================
-
-all_views = list(FilteredElementCollector(doc).OfClass(ViewPlan))
-target_view = None
-for v in all_views:
-    try:
-        if v.GenLevel is None:
-            continue
-        if v.GenLevel.Id != target_level.Id:
-            continue
-        name = str(v.Name).lower()
-        if "overlay" in name or "proposed" in name:
-            continue
-        if "existing" in name and "condition" in name:
-            target_view = v
-            break
-    except Exception:
-        pass
-
 if target_view is None:
     for v in all_views:
         try:
-            if v.GenLevel is None:
-                continue
-            if v.GenLevel.Id != target_level.Id:
-                continue
-            name = str(v.Name).lower()
-            if "overlay" in name:
-                continue
-            if "existing" in name:
+            if _view_ok(v) and v.GenLevel.Id == target_level.Id:
+                if _name_score(v.Name) < 0:
+                    continue
                 target_view = v
+                view_source = "first view on target level"
                 break
         except Exception:
             pass
 
-if target_view is None:
-    for v in all_views:
-        try:
-            if v.GenLevel is not None and v.GenLevel.Id == target_level.Id:
-                target_view = v
-                break
-        except Exception:
-            pass
-
-level_override_info = ""
-if target_view is not None and ALLOW_VIEW_LEVEL_OVERRIDE:
-    try:
-        view_level = target_view.GenLevel
-        if view_level is not None and view_level.Id != target_level.Id:
-            level_override_info = "View '{}' uses level '{}'.".format(
-                target_view.Name, view_level.Name
-            )
-            target_level = view_level
-    except Exception:
-        pass
-elif target_view is not None:
-    level_override_info = "Graphics view '{}' (level kept as '{}')".format(
-        target_view.Name, target_level.Name
-    )
+level_override_info = "View '{}' via {} | level '{}'".format(
+    target_view.Name if target_view else "(none)",
+    view_source or "level fallback",
+    target_level.Name,
+)
 
 
 # ===========================================================================
@@ -1158,9 +1218,11 @@ doc.Regenerate()
 # ===========================================================================
 
 placed = []
+placed_ids = []
 skipped = []
 wall_placed = []
 orientation_report = []
+revealed_categories = set()
 cad_rotation_deg = math.degrees(cad_rotation_rad)
 
 for g in gondolas:
@@ -1222,6 +1284,17 @@ for g in gondolas:
             target_level,
             StructuralType.NonStructural
         )
+        placed_ids.append(instance.Id)
+
+        if target_view is not None:
+            try:
+                cat = instance.Category
+                if cat is not None and cat.Id not in revealed_categories:
+                    if target_view.GetCategoryHidden(cat.Id):
+                        target_view.SetCategoryHidden(cat.Id, False)
+                    revealed_categories.add(cat.Id)
+            except Exception:
+                pass
 
         if existing_phase is not None:
             try:
@@ -1289,6 +1362,20 @@ for g in gondolas:
 
 t.Commit()
 
+# Jump the open view to the first placed gondola so the trace is visible
+# on 1.0 EXISTING CONDITIONS - GROUND instead of an empty CAD underlay.
+zoom_info = "View was not changed."
+if uidoc is not None and placed_ids:
+    try:
+        if target_view is not None:
+            uidoc.RequestViewChange(target_view)
+        uidoc.ShowElements(placed_ids[0])
+        zoom_info = "Opened '{}' and zoomed to first placed gondola.".format(
+            target_view.Name if target_view else target_level.Name
+        )
+    except Exception as ex:
+        zoom_info = "Could not zoom: {}".format(str(ex))
+
 
 # ===========================================================================
 # REPORT
@@ -1305,6 +1392,14 @@ lines = [
     "Placed                 : {}".format(len(placed)),
     "Skipped                : {}".format(len(skipped)),
     "Deleted previous       : {}".format(deleted_count),
+    "",
+    "WHERE TO LOOK",
+    "  Open this view       : {}".format(
+        target_view.Name if target_view else "(no plan view)"
+    ),
+    "  {}".format(zoom_info),
+    "  Previous run hosted on 2.0 PROPOSED — that is why",
+    "  1.0 EXISTING CONDITIONS - GROUND looked empty.",
     "",
     "LEVEL",
     "  Level used           : {}".format(target_level.Name),
