@@ -1,7 +1,7 @@
 # Dynamo_ExistingGondolaPlacement
 # Revit 2025 / Dynamo CPython3 compatible
 #
-# Version 2026-10-05f-existing-view-only
+# Version 2026-10-05g-keep-existing-view
 #
 # Places existing-condition gondolas from the JSON written by
 # Gondola_OrientationDetector.py.
@@ -70,7 +70,7 @@ MM_TO_FT = 1.0 / 304.8
 
 # Hard rule: place only on Existing. Never Proposed, selling-floor, or overlay.
 EXISTING_ONLY = True
-SCRIPT_VERSION = "2026-10-05f-existing-view-only"
+SCRIPT_VERSION = "2026-10-05g-keep-existing-view"
 TRACE_NOTE_PREFIX = "EG:"
 
 USE_JSON_ANGLE = True
@@ -962,6 +962,17 @@ if target_view is not None and getattr(target_view, "GenLevel", None) is not Non
 elif chosen_level_name:
     target_level = level_map.get(chosen_level_name)
 
+if (
+    active_view is not None
+    and is_existing_conditions_view(getattr(active_view, "Name", ""))
+):
+    target_view = active_view
+    chosen_view_name = str(active_view.Name)
+    if getattr(active_view, "GenLevel", None) is not None:
+        target_level = active_view.GenLevel
+        chosen_level_name = str(target_level.Name)
+    placement_reason = "open Existing Conditions view"
+
 if target_view is not None and not is_existing_conditions_view(target_view.Name):
     target_view = None
 
@@ -1057,10 +1068,48 @@ def get_view_phase(view):
         return None
 
 
+GONDOLA_BICS = (
+    BuiltInCategory.OST_SpecialityEquipment,
+    BuiltInCategory.OST_Furniture,
+    BuiltInCategory.OST_GenericModel,
+    BuiltInCategory.OST_Casework,
+    BuiltInCategory.OST_MechanicalEquipment,
+    BuiltInCategory.OST_FurnitureSystems,
+    BuiltInCategory.OST_TextNotes,
+    BuiltInCategory.OST_Lines,
+    BuiltInCategory.OST_DetailComponents,
+)
+
+
+def unhide_gondola_categories(element, notes, label):
+    if element is None:
+        return
+    shown = 0
+    for bic in GONDOLA_BICS:
+        try:
+            cat = Category.GetCategory(doc, bic)
+            if cat is None:
+                continue
+            element.SetCategoryHidden(cat.Id, False)
+            shown += 1
+        except Exception:
+            pass
+    notes.append("Unhid {} categories on {}".format(shown, label))
+
+
+def to_id_list(ids):
+    from System.Collections.Generic import List as NetList
+    result = NetList[ElementId]()
+    for item in ids:
+        result.Add(item)
+    return result
+
+
 def prepare_view_for_gondolas(view, notes):
     """
     Existing Conditions templates hide model categories so only CAD shows.
-    Detach the template on this view and turn gondola categories on.
+    Turn those categories on in the template and on this view. Never
+    call ShowElements — Revit then jumps to Proposed.
     """
     if view is None:
         return
@@ -1070,10 +1119,13 @@ def prepare_view_for_gondolas(view, notes):
         if tid is not None and tid != invalid_element_id() and tid.IntegerValue != -1:
             template = doc.GetElement(tid)
             tname = safe_element_name(template) if template is not None else str(tid)
+            unhide_gondola_categories(template, notes, "template '{}'".format(tname))
             view.ViewTemplateId = invalid_element_id()
             notes.append("Detached view template '{}' so families can display".format(tname))
     except Exception as ex:
-        notes.append("Could not detach view template: {}".format(ex))
+        notes.append("Could not update view template: {}".format(ex))
+
+    unhide_gondola_categories(view, notes, "view '{}'".format(view.Name))
 
     try:
         view.DisableTemporaryViewMode(TemporaryViewMode.TemporaryHideIsolate)
@@ -1083,21 +1135,6 @@ def prepare_view_for_gondolas(view, notes):
         view.DisableTemporaryViewMode(TemporaryViewMode.RevealHiddenElements)
     except Exception:
         pass
-
-    for bic in (
-        BuiltInCategory.OST_SpecialityEquipment,
-        BuiltInCategory.OST_Furniture,
-        BuiltInCategory.OST_GenericModel,
-        BuiltInCategory.OST_Casework,
-        BuiltInCategory.OST_MechanicalEquipment,
-        BuiltInCategory.OST_FurnitureSystems,
-    ):
-        try:
-            cat = Category.GetCategory(doc, bic)
-            if cat is not None:
-                view.SetCategoryHidden(cat.Id, False)
-        except Exception:
-            pass
 
     try:
         pf_param = view.get_Parameter(BuiltInParameter.VIEW_PHASE_FILTER)
@@ -1436,32 +1473,42 @@ else:
         except Exception as ex:
             skipped.append("ERROR {} :: {}".format(item.get("code", "?"), str(ex)))
 
+    if placed_ids:
+        try:
+            id_list = to_id_list(placed_ids)
+        except Exception as ex:
+            id_list = None
+            visibility_notes.append("Could not build element id list: {}".format(ex))
+        if id_list is not None:
+            hidden_views = 0
+            for view in all_views:
+                try:
+                    if is_proposed_scope(view.Name):
+                        view.HideElements(id_list)
+                        hidden_views += 1
+                except Exception:
+                    pass
+            visibility_notes.append(
+                "Hidden families in {} Proposed/Overlay views".format(hidden_views)
+            )
+            try:
+                target_view.UnhideElements(id_list)
+                visibility_notes.append("Unhid families on Existing view")
+            except Exception as ex:
+                visibility_notes.append("Could not unhide on Existing view: {}".format(ex))
+
     t.Commit()
 
-    show_view = target_view
-    if uidoc is not None and show_view is not None:
+    if uidoc is not None and target_view is not None:
         try:
-            uidoc.ActiveView = show_view
-            visibility_notes.append("Activated view '{}'".format(show_view.Name))
+            uidoc.ActiveView = target_view
+            visibility_notes.append("Kept active view '{}'".format(target_view.Name))
         except Exception as ex:
-            visibility_notes.append("Could not activate view: {}".format(ex))
-        if placed_ids:
-            try:
-                uidoc.ShowElements(placed_ids[0])
-                visibility_notes.append("Zoomed to first placed gondola")
-            except Exception:
-                try:
-                    from System.Collections.Generic import List as NetList
-                    zoom_ids = NetList[ElementId]()
-                    zoom_ids.Add(placed_ids[0])
-                    uidoc.ShowElements(zoom_ids)
-                    visibility_notes.append("Zoomed to first placed gondola")
-                except Exception as ex:
-                    visibility_notes.append("Could not zoom to gondola: {}".format(ex))
-            try:
-                uidoc.RefreshActiveView()
-            except Exception:
-                pass
+            visibility_notes.append("Could not keep Existing view active: {}".format(ex))
+        try:
+            uidoc.RefreshActiveView()
+        except Exception:
+            pass
 
 
 sep = "=" * 75
