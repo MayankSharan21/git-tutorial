@@ -1238,6 +1238,19 @@ def turn_profile_onto_bay(
     return other
 
 
+def _add_polyline(points, out):
+
+    # Revit hands these back as .NET lists. Copying to a Python list
+    # first keeps the indexing below working under both IronPython and
+    # CPython3.
+    points = [p for p in points]
+
+    for i in range(len(points) - 1):
+        a = points[i]
+        b = points[i + 1]
+        out.append((a.X, a.Y, b.X, b.Y))
+
+
 def _collect_plan_segments(geometry, out, depth=0):
 
     """
@@ -1265,31 +1278,15 @@ def _collect_plan_segments(geometry, out, depth=0):
                     continue
 
                 for edge in obj.Edges:
-
-                    points = edge.Tessellate()
-
-                    for i in range(len(points) - 1):
-                        a = points[i]
-                        b = points[i + 1]
-                        out.append((a.X, a.Y, b.X, b.Y))
+                    _add_polyline(edge.Tessellate(), out)
 
             elif isinstance(obj, PolyLine):
 
-                points = obj.GetCoordinates()
-
-                for i in range(len(points) - 1):
-                    a = points[i]
-                    b = points[i + 1]
-                    out.append((a.X, a.Y, b.X, b.Y))
+                _add_polyline(obj.GetCoordinates(), out)
 
             elif isinstance(obj, Curve):
 
-                points = obj.Tessellate()
-
-                for i in range(len(points) - 1):
-                    a = points[i]
-                    b = points[i + 1]
-                    out.append((a.X, a.Y, b.X, b.Y))
+                _add_polyline(obj.Tessellate(), out)
 
         except Exception:
             continue
