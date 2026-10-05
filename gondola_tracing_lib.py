@@ -18,12 +18,18 @@ STACK_PAIR_MAX_MM = 550.0
 # Hard cap for pairing (mm). Dense aisles need a tighter cap than 1500.
 MAX_PAIR_DIST_MM = 1100.0
 PREFERRED_PAIR_DIST_MM = 450.0
-# Nearby CAD segment search radius (mm).
-GEOMETRY_RADIUS_MM = 2200.0
-MIN_SEGMENT_LEN_MM = 350.0
-MAX_SEGMENT_LEN_MM = 8000.0
-CARDINAL_SNAP_DEG = 8.0
-DIAGONAL_SNAP_DEG = 6.0
+# Nearby CAD segment search radius (mm). Long store walls beyond this
+# must not out-vote the local gondola rectangle.
+GEOMETRY_RADIUS_MM = 1400.0
+MIN_SEGMENT_LEN_MM = 400.0
+MAX_SEGMENT_LEN_MM = 3200.0
+BAY_LEN_MIN_MM = 700.0
+BAY_LEN_MAX_MM = 2200.0
+CARDINAL_SNAP_DEG = 12.0
+DIAGONAL_SNAP_DEG = 8.0
+RUN_ALIGN_MM = 180.0
+RUN_PITCH_MIN_MM = 700.0
+RUN_PITCH_MAX_MM = 2600.0
 
 
 MTEXT_CODE_RE = re.compile(
@@ -325,6 +331,11 @@ def dominant_segment_angle(
             continue
         ang = unsigned_angle_from_offset(x2 - x1, y2 - y1)
         weight = length / (1.0 + dist)
+        # Prefer bay-sized edges; down-weight long partition walls.
+        if BAY_LEN_MIN_MM <= length <= BAY_LEN_MAX_MM:
+            weight *= 3.5
+        elif length > 4000.0:
+            weight *= 0.12
         # 2° bins covering unsigned [0, 180)
         key = int(round(ang / 2.0)) % 90
         bins[key] = bins.get(key, 0.0) + weight
@@ -399,6 +410,177 @@ def estimate_gondola_axis(
         "pair_angle": round(pair_angle, 3),
         "label_rotation": round(normalize_angle_360(label_rotation), 3),
     }
+
+
+def _run_snap(angle: float) -> float:
+    snapped, _src = snap_axis_angle(angle)
+    # Neighbour consensus is allowed a wider cardinal pull so 292°
+    # aisles collapse onto 270/90.
+    a = normalize_angle_180(angle)
+    wider = [
+        (0.0, 28.0),
+        (90.0, 28.0),
+        (45.0, 12.0),
+        (135.0, 12.0),
+    ]
+    best = (snapped, 999.0)
+    for target, tol in wider:
+        delta = angle_delta_180(a, target)
+        if delta <= tol and delta < best[1]:
+            best = (target, delta)
+    return best[0]
+
+
+def smooth_run_orientations(gondolas: List[Dict[str, Any]]) -> int:
+    """
+    Gondolas on the same aisle (same X or Y, 900-1200 mm pitch) must
+    share one unsigned axis. Mixed 0°/270° on a single row is a
+    geometry-vote error, not a real store layout.
+    """
+    n = len(gondolas)
+    if n < 2:
+        return 0
+
+    parent = list(range(n))
+
+    def find(i: int) -> int:
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    def union(a: int, b: int) -> None:
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parent[rb] = ra
+
+    for i in range(n):
+        xi = float(gondolas[i].get("x", 0) or 0)
+        yi = float(gondolas[i].get("y", 0) or 0)
+        for j in range(i + 1, n):
+            dx = abs(xi - float(gondolas[j].get("x", 0) or 0))
+            dy = abs(yi - float(gondolas[j].get("y", 0) or 0))
+            same_row = dy <= RUN_ALIGN_MM and RUN_PITCH_MIN_MM <= dx <= RUN_PITCH_MAX_MM
+            same_col = dx <= RUN_ALIGN_MM and RUN_PITCH_MIN_MM <= dy <= RUN_PITCH_MAX_MM
+            if same_row or same_col:
+                union(i, j)
+
+    groups: Dict[int, List[int]] = {}
+    for i in range(n):
+        groups.setdefault(find(i), []).append(i)
+
+    changed = 0
+    for members in groups.values():
+        if len(members) < 2:
+            continue
+        votes: Dict[float, int] = {}
+        for i in members:
+            key = _run_snap(gondolas[i].get("orientation_angle", 0) or 0)
+            votes[key] = votes.get(key, 0) + 1
+        winner = max(votes, key=votes.get)
+        for i in members:
+            g = gondolas[i]
+            old = float(g.get("orientation_angle", 0) or 0)
+            if angle_delta_180(old, winner) < 0.5:
+                continue
+            dx = float(g.get("pair_dx", 0) or 0)
+            dy = float(g.get("pair_dy", 0) or 0)
+            placement = directed_from_axis(winner, dx, dy)
+            g["orientation_angle"] = round(winner, 3)
+            g["placement_angle"] = round(placement, 3)
+            g["rotation"] = g["placement_angle"]
+            g["orientation"] = classify_orientation(winner)
+            src = str(g.get("axis_source", "") or "")
+            if "run_consensus" not in src:
+                g["axis_source"] = (src + "+run_consensus").strip("+")
+            changed += 1
+    return changed
+
+
+def name_key(value: Any) -> str:
+    return re.sub(r"[^A-Z0-9]", "", str(value or "").upper())
+
+
+def name_tokens(value: Any) -> List[str]:
+    return re.findall(r"[A-Z0-9]+", str(value or "").upper())
+
+
+def score_symbol_candidate(
+    code: str,
+    family_hint: str,
+    type_hint: str,
+    family_name: str,
+    type_name: str,
+) -> int:
+    """
+    Higher is better. Used to place codes whose TYPE_MAP names do not
+    exactly match the Revit family type (6WAY, T2 ARM ONLY, 34RELO).
+    """
+    code_k = name_key(code)
+    hint_k = name_key(type_hint)
+    fam_k = name_key(family_name)
+    typ_k = name_key(type_name)
+    hint_fam = name_key(family_hint)
+    score = 0
+
+    if hint_k and typ_k == hint_k:
+        score += 120
+    if code_k and typ_k == code_k:
+        score += 110
+    if hint_k and (hint_k in typ_k or typ_k in hint_k):
+        score += 70
+    if code_k and code_k in typ_k:
+        score += 60
+    if hint_fam and fam_k == hint_fam:
+        score += 40
+    elif hint_fam and (hint_fam in fam_k or fam_k in hint_fam):
+        score += 20
+
+    code_tokens = set(name_tokens(code))
+    hint_tokens = set(name_tokens(type_hint))
+    type_tokens = set(name_tokens(type_name))
+    ignore = {"THE", "AND", "END", "PANEL", "GONDOLA", "FAMILY"}
+    if code_tokens and type_tokens:
+        overlap = (code_tokens & type_tokens) - ignore
+        score += 8 * len(overlap)
+        extra = type_tokens - code_tokens - hint_tokens - ignore
+        score -= 6 * len(extra)
+        if "T2" in code_tokens and "T2" in type_tokens and "ARM" in type_tokens:
+            score += 50
+            if "ONLY" in code_tokens and "TABLE" in type_tokens and "ARM" in type_tokens:
+                score -= 35
+        if "6WAY" in code_k and "6WAY" in typ_k:
+            score += 80
+        if "6" in code_tokens and "WAY" in type_tokens:
+            score += 40
+        if "16" in code_tokens and "WAY" in type_tokens:
+            score += 40
+
+    return score
+
+
+def resolve_symbol_name(
+    code: str,
+    family_hint: str,
+    type_hint: str,
+    catalog: Sequence[Tuple[str, str]],
+    min_score: int = 70,
+) -> Optional[Tuple[str, str, int]]:
+    """Return (family, type, score) from a Revit-like catalogue."""
+    catalog_set = set(catalog)
+    if (family_hint, type_hint) in catalog_set:
+        return family_hint, type_hint, 1000
+
+    best: Optional[Tuple[str, str, int]] = None
+    for family_name, type_name in catalog:
+        score = score_symbol_candidate(
+            code, family_hint, type_hint, family_name, type_name
+        )
+        if best is None or score > best[2]:
+            best = (family_name, type_name, score)
+    if best and best[2] >= min_score:
+        return best
+    return None
 
 
 def preferred_json_angle(gondola: Dict[str, Any]) -> Optional[float]:

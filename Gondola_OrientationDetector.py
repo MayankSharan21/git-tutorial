@@ -39,6 +39,7 @@ from gondola_tracing_lib import (
     normalize_angle_360,
     normalize_code,
     snap_axis_angle,
+    smooth_run_orientations,
     text_visual_point,
 )
 
@@ -184,31 +185,38 @@ def _collect_segments_from_entity(entity, scale: float, out: list) -> None:
         return
 
 
+def _walk_entity(entity):
+    dt = entity.dxftype()
+    if dt == "INSERT":
+        try:
+            for attrib in entity.attribs:
+                yield attrib
+        except Exception:
+            pass
+        nested = []
+        try:
+            nested = list(entity.virtual_entities())
+        except Exception:
+            nested = []
+        if not nested:
+            yield entity
+            return
+        for ve in nested:
+            for child in _walk_entity(ve):
+                yield child
+        return
+    yield entity
+
+
 def _iter_model_entities(doc):
     """
-    Yield modelspace entities with INSERT exploded via virtual_entities.
-
-    The previous script walked block *definitions* in local coordinates,
-    which duplicated labels and placed them at the wrong origin.
+    Yield modelspace entities with INSERT exploded via virtual_entities,
+    including nested blocks.
     """
     msp = doc.modelspace()
     for entity in msp:
-        dt = entity.dxftype()
-        if dt == "INSERT":
-            try:
-                for attrib in entity.attribs:
-                    yield attrib
-            except Exception:
-                pass
-            try:
-                for ve in entity.virtual_entities():
-                    if ve.dxftype() == "INSERT":
-                        continue
-                    yield ve
-            except Exception:
-                yield entity
-        else:
-            yield entity
+        for child in _walk_entity(entity):
+            yield child
 
 
 def extract_with_orientation(dxf_path: str):
@@ -364,6 +372,8 @@ def extract_with_orientation(dxf_path: str):
     print(
         "Unmatched type labels: {}".format(len(type_texts) - len(used_type))
     )
+    smoothed = smooth_run_orientations(gondolas)
+    print("Run-consensus angle fixes: {}".format(smoothed))
     return gondolas, {
         "unmatched_size": [
             size_texts[i] for i in range(len(size_texts)) if i not in used_size

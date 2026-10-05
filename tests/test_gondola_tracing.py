@@ -157,5 +157,92 @@ class MiscTests(unittest.TestCase):
         self.assertGreater(y, 0)
 
 
+class RunConsensusTests(unittest.TestCase):
+    def test_row_agrees_on_majority_axis(self):
+        from gondola_tracing_lib import smooth_run_orientations
+
+        gondolas = [
+            {
+                "code": "21FLCA",
+                "x": 308782.0,
+                "y": 34559.0,
+                "orientation_angle": 0.0,
+                "placement_angle": 0.0,
+                "pair_dx": 0,
+                "pair_dy": 300,
+                "axis_source": "cad_geometry",
+            },
+            {
+                "code": "34FLCS",
+                "x": 309997.0,
+                "y": 34559.0,
+                "orientation_angle": 90.0,
+                "placement_angle": 270.0,
+                "pair_dx": 0,
+                "pair_dy": 300,
+                "axis_source": "cad_geometry",
+            },
+            {
+                "code": "21FLCA",
+                "x": 311212.0,
+                "y": 34559.0,
+                "orientation_angle": 90.0,
+                "placement_angle": 270.0,
+                "pair_dx": 0,
+                "pair_dy": 300,
+                "axis_source": "cad_geometry",
+            },
+        ]
+        changed = smooth_run_orientations(gondolas)
+        self.assertGreaterEqual(changed, 1)
+        axes = {g["orientation_angle"] for g in gondolas}
+        self.assertEqual(len(axes), 1)
+        self.assertEqual(list(axes)[0], 90.0)
+
+
+class FuzzyTypeTests(unittest.TestCase):
+    def test_six_way_matches_racking_name(self):
+        from gondola_tracing_lib import resolve_symbol_name
+
+        catalog = [
+            ("Hotspots", "Racking-6 Way"),
+            ("Hotspots", "15H Hotspot"),
+        ]
+        hit = resolve_symbol_name(
+            "6WAY", "Hotspots", "Racking-6_Way", catalog
+        )
+        self.assertIsNotNone(hit)
+        self.assertEqual(hit[1], "Racking-6 Way")
+
+    def test_t2_arm_prefers_arm_type(self):
+        from gondola_tracing_lib import resolve_symbol_name
+
+        catalog = [
+            ("Hotspots", "T2 VM RAIL + DISPLAY ARM (TABLE_T)"),
+            ("Hotspots", "T2 ARM"),
+        ]
+        hit = resolve_symbol_name(
+            "T2 ARM ONLY", "Hotspots", "T2 TABLE ARM ONLY", catalog
+        )
+        self.assertIsNotNone(hit)
+        self.assertEqual(hit[1], "T2 ARM")
+
+    def test_34relo_falls_back_to_end_panel_elo(self):
+        from gondola_tracing_lib import resolve_symbol_name
+
+        catalog = [
+            ("End_Panel", "34ELO"),
+            ("Floor_Gondola", "34FLCA"),
+        ]
+        hit = resolve_symbol_name(
+            "34RELO",
+            "End_Panel_Decks",
+            "34ELO(End_Panel_Decks)",
+            catalog,
+        )
+        self.assertIsNotNone(hit)
+        self.assertEqual(hit[:2], ("End_Panel", "34ELO"))
+
+
 if __name__ == "__main__":
     unittest.main()

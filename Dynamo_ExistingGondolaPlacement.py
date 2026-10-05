@@ -54,8 +54,13 @@ JSON_PATH = r"C:\Users\msharan\OneDrive - Kmart Australia Limited\Desktop\Stores
 
 LEVEL_NAME = "00-GROUND"
 
-# Partial CAD import name. Leave "" to use the first suitable CAD import.
-CAD_LINK_NAME = ""
+# Never switch LEVEL_NAME to whatever plan view Dynamo happened to find
+# (overlay views named "EXISTING & PROPOSED" previously stole the
+# proposed selling-floor level).
+ALLOW_VIEW_LEVEL_OVERRIDE = False
+
+# Partial CAD import name. Prefer the existing-conditions link.
+CAD_LINK_NAME = "Existing Conditions"
 
 MM_TO_FT = 1.0 / 304.8
 
@@ -484,6 +489,46 @@ TYPE_MAP = {
     for key, value in TYPE_MAP.items()
 }
 
+# Extra (family, type) tries when the mapped name is not loaded in the project.
+TYPE_ALIASES = {
+    "6WAY": [
+        ("Hotspots", "Racking-6_Way"),
+        ("Hotspots", "Racking-6 Way"),
+        ("Hotspots", "Racking - 6 Way"),
+        ("Hotspots", "6_Way"),
+        ("Hotspots", "6Way"),
+        ("Hotspots", "6 Way"),
+        ("Hotspots", "6-Way"),
+        ("Hotspots", "Racking-6Way"),
+    ],
+    "T2 ARM ONLY": [
+        ("Hotspots", "T2 TABLE ARM ONLY"),
+        ("Hotspots", "T2 ARM ONLY"),
+        ("Hotspots", "T2 ARM"),
+        ("Hotspots", "T2 TABLE ARM"),
+        ("Hotspots", "T2 VM RAIL + DISPLAY ARM (TABLE_T)"),
+    ],
+    "34RELO": [
+        ("End_Panel", "34ELO"),
+        ("End_Panel_Decks", "34ELO"),
+        ("End_Panel_Decks", "34ELO(End_Panel_Decks)"),
+        ("End_Panel_Decks", "34ELO (End_Panel_Decks)"),
+    ],
+    "16_WAY": [
+        ("Hotspots", "Racking-16_Way"),
+        ("Hotspots", "Racking-16 Way"),
+        ("Hotspots", "16_Way"),
+        ("Hotspots", "16 Way"),
+        ("Hotspots", "16-Way"),
+    ],
+    "STRAIGHT RAIL": [
+        ("Hotspots", "racking-straight rail"),
+        ("Hotspots", "Straight rail"),
+        ("Hotspots", "Racking-Straight Rail"),
+        ("Hotspots", "Straight Rail"),
+    ],
+}
+
 
 # ===========================================================================
 # SAFE REVIT HELPERS
@@ -581,6 +626,55 @@ def normalize_code(text):
     raw = str(text).replace("\\P", " ")
     raw = re.sub(r"\s+", " ", raw)
     return raw.upper().strip()
+
+
+def name_key(value):
+    return re.sub(r"[^A-Z0-9]", "", str(value or "").upper())
+
+
+def name_tokens(value):
+    return re.findall(r"[A-Z0-9]+", str(value or "").upper())
+
+
+def score_symbol_candidate(code, family_hint, type_hint, family_name, type_name):
+    code_k = name_key(code)
+    hint_k = name_key(type_hint)
+    fam_k = name_key(family_name)
+    typ_k = name_key(type_name)
+    hint_fam = name_key(family_hint)
+    score = 0
+    if hint_k and typ_k == hint_k:
+        score += 120
+    if code_k and typ_k == code_k:
+        score += 110
+    if hint_k and (hint_k in typ_k or typ_k in hint_k):
+        score += 70
+    if code_k and code_k in typ_k:
+        score += 60
+    if hint_fam and fam_k == hint_fam:
+        score += 40
+    elif hint_fam and (hint_fam in fam_k or fam_k in hint_fam):
+        score += 20
+    code_tokens = set(name_tokens(code))
+    hint_tokens = set(name_tokens(type_hint))
+    type_tokens = set(name_tokens(type_name))
+    ignore = {"THE", "AND", "END", "PANEL", "GONDOLA", "FAMILY"}
+    if code_tokens and type_tokens:
+        overlap = (code_tokens & type_tokens) - ignore
+        score += 8 * len(overlap)
+        extra = type_tokens - code_tokens - hint_tokens - ignore
+        score -= 6 * len(extra)
+        if "T2" in code_tokens and "T2" in type_tokens and "ARM" in type_tokens:
+            score += 50
+            if "ONLY" in code_tokens and "TABLE" in type_tokens and "ARM" in type_tokens:
+                score -= 35
+        if "6WAY" in code_k and "6WAY" in typ_k:
+            score += 80
+        if "6" in code_tokens and "WAY" in type_tokens:
+            score += 40
+        if "16" in code_tokens and "WAY" in type_tokens:
+            score += 40
+    return score
 
 
 def normalize_angle(angle):
@@ -699,6 +793,7 @@ cad_offset_info = "No CAD transform found. Using origin (0,0)."
 all_cad_found = []
 all_imports = list(FilteredElementCollector(doc).OfClass(ImportInstance))
 selected_import = None
+cad_candidates = []
 
 for imp in all_imports:
     try:
@@ -741,33 +836,40 @@ for imp in all_imports:
             )
         )
 
-        if CAD_LINK_NAME and CAD_LINK_NAME.lower() not in cad_name_str.lower():
+        low = cad_name_str.lower()
+        if CAD_LINK_NAME and CAD_LINK_NAME.lower() not in low:
             continue
 
-        if selected_import is None:
-            selected_import = imp
-            cad_transform = transform
-            cad_offset_x = ox
-            cad_offset_y = oy
-            cad_rotation_rad = cad_angle
-            cad_basis_xx = bx.X
-            cad_basis_xy = bx.Y
-            cad_basis_yx = by.X
-            cad_basis_yy = by.Y
-            cad_offset_info = (
-                "[{}] {} | offset=({:.3f},{:.3f}) ft = ({:.0f},{:.0f}) mm | "
-                "rotation={:.3f}°"
-            ).format(
-                link_type,
-                cad_name_str,
-                ox,
-                oy,
-                ox * 304.8,
-                oy * 304.8,
-                math.degrees(cad_angle),
-            )
+        score = 0
+        if "existing" in low:
+            score += 20
+        if "condition" in low:
+            score += 15
+        if "selling" in low:
+            score -= 10
+        cad_candidates.append((score, imp, transform, ox, oy, cad_angle, bx, by, link_type, cad_name_str))
     except Exception as ex:
         all_cad_found.append("    CAD ERROR: {}".format(str(ex)))
+
+if cad_candidates:
+    cad_candidates.sort(key=lambda row: row[0], reverse=True)
+    score, selected_import, cad_transform, cad_offset_x, cad_offset_y, cad_rotation_rad, bx, by, link_type, cad_name_str = cad_candidates[0]
+    cad_basis_xx = bx.X
+    cad_basis_xy = bx.Y
+    cad_basis_yx = by.X
+    cad_basis_yy = by.Y
+    cad_offset_info = (
+        "[{}] {} | offset=({:.3f},{:.3f}) ft = ({:.0f},{:.0f}) mm | "
+        "rotation={:.3f}°"
+    ).format(
+        link_type,
+        cad_name_str,
+        cad_offset_x,
+        cad_offset_y,
+        cad_offset_x * 304.8,
+        cad_offset_y * 304.8,
+        math.degrees(cad_rotation_rad),
+    )
 
 
 # ===========================================================================
@@ -776,6 +878,7 @@ for imp in all_imports:
 
 all_symbols = list(FilteredElementCollector(doc).OfClass(FamilySymbol))
 symbol_lookup = {}
+symbol_lookup_ci = {}
 symbol_errors = []
 
 for s in all_symbols:
@@ -784,15 +887,63 @@ for s in all_symbols:
         type_name = safe_symbol_name(s)
         if family_name and type_name:
             symbol_lookup[(family_name, type_name)] = s
+            symbol_lookup_ci[(family_name.upper(), type_name.upper())] = (
+                family_name, type_name, s
+            )
     except Exception as ex:
         symbol_errors.append(str(ex))
 
 
+def lookup_pair(fname, tname):
+    if (fname, tname) in symbol_lookup:
+        return fname, tname, symbol_lookup[(fname, tname)]
+    key_ci = (str(fname).upper(), str(tname).upper())
+    if key_ci in symbol_lookup_ci:
+        return symbol_lookup_ci[key_ci]
+    return None
+
+
+def resolve_symbol(code, fname, tname):
+    """Exact map, aliases, then fuzzy type name match."""
+    hit = lookup_pair(fname, tname)
+    if hit:
+        return hit[0], hit[1], hit[2], "exact"
+
+    for alt_fam, alt_typ in TYPE_ALIASES.get(code, []):
+        hit = lookup_pair(alt_fam, alt_typ)
+        if hit:
+            return hit[0], hit[1], hit[2], "alias"
+
+    want = name_key(tname) or name_key(code)
+    best = None
+    for family_name, type_name in symbol_lookup.keys():
+        score = score_symbol_candidate(
+            code, fname, tname, family_name, type_name
+        )
+        if best is None or score > best[0]:
+            best = (score, family_name, type_name)
+    if best and best[0] >= 70:
+        fam, typ = best[1], best[2]
+        return fam, typ, symbol_lookup[(fam, typ)], "fuzzy:{}".format(best[0])
+
+    return None
+
+
+resolved_for_json = {}
 missing = []
-for code, mapping in TYPE_MAP.items():
-    fname, tname = mapping
-    if (fname, tname) not in symbol_lookup:
-        missing.append("  {} → {} / {}".format(code, fname, tname))
+seen_missing = set()
+for g in gondolas:
+    code = normalize_code(g.get("code", ""))
+    if code not in TYPE_MAP:
+        continue
+    fname, tname = TYPE_MAP[code]
+    resolved = resolve_symbol(code, fname, tname)
+    if resolved is None:
+        if code not in seen_missing:
+            seen_missing.add(code)
+            missing.append("  {} → {} / {}".format(code, fname, tname))
+    else:
+        resolved_for_json[code] = resolved
 
 
 # ===========================================================================
@@ -837,6 +988,8 @@ for v in all_views:
         if v.GenLevel.Id != target_level.Id:
             continue
         name = str(v.Name).lower()
+        if "overlay" in name or "proposed" in name:
+            continue
         if "existing" in name and "condition" in name:
             target_view = v
             break
@@ -846,14 +999,30 @@ for v in all_views:
 if target_view is None:
     for v in all_views:
         try:
-            if "existing" in str(v.Name).lower():
+            if v.GenLevel is None:
+                continue
+            if v.GenLevel.Id != target_level.Id:
+                continue
+            name = str(v.Name).lower()
+            if "overlay" in name:
+                continue
+            if "existing" in name:
+                target_view = v
+                break
+        except Exception:
+            pass
+
+if target_view is None:
+    for v in all_views:
+        try:
+            if v.GenLevel is not None and v.GenLevel.Id == target_level.Id:
                 target_view = v
                 break
         except Exception:
             pass
 
 level_override_info = ""
-if target_view is not None:
+if target_view is not None and ALLOW_VIEW_LEVEL_OVERRIDE:
     try:
         view_level = target_view.GenLevel
         if view_level is not None and view_level.Id != target_level.Id:
@@ -863,6 +1032,10 @@ if target_view is not None:
             target_level = view_level
     except Exception:
         pass
+elif target_view is not None:
+    level_override_info = "Graphics view '{}' (level kept as '{}')".format(
+        target_view.Name, target_level.Name
+    )
 
 
 # ===========================================================================
@@ -965,11 +1138,12 @@ doc.Regenerate()
 activated = set()
 for code, mapping in TYPE_MAP.items():
     fname, tname = mapping
-    key = (fname, tname)
-    if key not in symbol_lookup:
+    resolved = resolve_symbol(code, fname, tname)
+    if resolved is None:
         continue
     try:
-        symbol = symbol_lookup[key]
+        symbol = resolved[2]
+        key = (resolved[0], resolved[1])
         if not symbol.IsActive and key not in activated:
             symbol.Activate()
             activated.add(key)
@@ -997,14 +1171,27 @@ for g in gondolas:
             continue
 
         fname, tname = TYPE_MAP[code]
-        key = (fname, tname)
-        if key not in symbol_lookup:
+        resolved = resolve_symbol(code, fname, tname)
+        if resolved is None:
+            close = []
+            for family_name, type_name in symbol_lookup.keys():
+                sc = score_symbol_candidate(
+                    code, fname, tname, family_name, type_name
+                )
+                if sc >= 30:
+                    close.append((sc, family_name, type_name))
+            close.sort(reverse=True)
+            hint = ""
+            if close:
+                hint = " | closest: " + "; ".join(
+                    "{} / {} ({})".format(a, b, s) for s, a, b in close[:3]
+                )
             skipped.append(
-                "MISSING TYPE: {} → {} / {}".format(code, fname, tname)
+                "MISSING TYPE: {} → {} / {}{}".format(code, fname, tname, hint)
             )
             continue
 
-        symbol = symbol_lookup[key]
+        fname, tname, symbol, match_how = resolved
 
         x_mm = float(g.get("x", 0) or 0)
         y_mm = float(g.get("y", 0) or 0)
@@ -1065,12 +1252,15 @@ for g in gondolas:
             )
 
         placed.append(
-            "{:<24} @ ({:>9.0f}, {:>9.0f}) mm angle={:>8.3f}° {}".format(
+            "{:<24} @ ({:>9.0f}, {:>9.0f}) mm angle={:>8.3f}° {} [{} / {} via {}]".format(
                 code,
                 x_mm,
                 y_mm,
                 angle_deg if angle_deg is not None else 0.0,
                 angle_source,
+                fname,
+                tname,
+                match_how,
             )
         )
         orientation_report.append(
