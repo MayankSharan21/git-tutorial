@@ -390,28 +390,112 @@ def is_noise_label(text):
     return False
 
 
-def layer_bucket(layer):
-    name = str(layer or "").upper()
-    if any(hint in name for hint in EXISTING_LAYER_HINTS):
+def classify_revit_name(name):
+    """
+    Classify a level, view, CAD, layer, or block name.
+
+    existing — existing-conditions content
+    proposed — proposed / selling-floor content
+    overlay  — existing and proposed together (do not place here)
+    neutral  — no hint
+    """
+    text = str(name or "").strip().lower()
+    if not text:
+        return "neutral"
+    if "overlay" in text:
+        return "overlay"
+    if "existing" in text and "proposed" in text:
+        return "overlay"
+    if "proposed" in text or "selling floor" in text or "selling-floor" in text:
+        return "proposed"
+    if any(hint.lower() in text for hint in EXISTING_LAYER_HINTS):
         return "existing"
-    if any(hint in name for hint in PROPOSED_LAYER_HINTS):
+    if "as built" in text or "as-built" in text:
+        return "existing"
+    if any(hint.lower() in text for hint in PROPOSED_LAYER_HINTS):
+        return "proposed"
+    return "neutral"
+
+
+def is_proposed_scope(name):
+    return classify_revit_name(name) in ("proposed", "overlay")
+
+
+def choose_existing_level_name(level_names, preferred=""):
+    """Pick an Existing level. Never returns a proposed or overlay name."""
+    names = [str(name) for name in level_names if name]
+    preferred_l = str(preferred or "").strip().lower()
+
+    def allowed(name):
+        return classify_revit_name(name) not in ("proposed", "overlay")
+
+    for name in names:
+        if name.strip().lower() == preferred_l and allowed(name):
+            return name
+    for name in names:
+        if classify_revit_name(name) == "existing" and "ground" in name.lower():
+            return name
+    for name in names:
+        if classify_revit_name(name) == "existing":
+            return name
+    for name in names:
+        if name.strip().lower() == preferred_l and allowed(name):
+            return name
+    return None
+
+
+def choose_existing_view_name(views, level_name):
+    """
+    views: iterable of (view_name, view_level_name)
+    Only Existing views on the chosen Existing level. Never overlay/proposed.
+    """
+    ranked = []
+    for view_name, view_level in views:
+        if str(view_level) != str(level_name):
+            continue
+        scope = classify_revit_name(view_name)
+        if scope in ("proposed", "overlay"):
+            continue
+        ranked.append((scope, str(view_name)))
+
+    for scope, view_name in ranked:
+        if scope == "existing" and "condition" in view_name.lower():
+            return view_name
+    for scope, view_name in ranked:
+        if scope == "existing":
+            return view_name
+    return None
+
+
+def layer_bucket(layer):
+    scope = classify_revit_name(layer)
+    if scope == "existing":
+        return "existing"
+    if scope in ("proposed", "overlay"):
         return "proposed"
     return "unknown"
 
 
-def filter_proposed_layers(raw_labels):
+def filter_proposed_layers(raw_labels, existing_only=True):
     """
-    Overlay DXFs often contain existing AND proposed text.
-    If both layer families are present, keep existing (+ untagged).
+    Tracing is Existing-only. Proposed / overlay layers are dropped.
+    Untagged layers are kept so a pure existing DXF still works.
     """
     buckets = defaultdict(list)
     for label in raw_labels:
         buckets[layer_bucket(label.get("layer", ""))].append(label)
-    if buckets["existing"] and buckets["proposed"]:
+
+    if not existing_only:
+        return list(raw_labels), {
+            "dropped_proposed_layer": 0,
+            "kept_existing_layer": len(raw_labels),
+        }
+
+    if buckets["proposed"]:
         kept = buckets["existing"] + buckets["unknown"]
         return kept, {
             "dropped_proposed_layer": len(buckets["proposed"]),
-            "kept_existing_layer": len(buckets["existing"]),
+            "kept_existing_layer": len(kept),
         }
     return list(raw_labels), {
         "dropped_proposed_layer": 0,

@@ -32,10 +32,10 @@ import sys
 import ezdxf
 
 try:
-    from gondola_lib import build_gondolas, summarise
+    from gondola_lib import build_gondolas, is_proposed_scope, summarise
 except ImportError:
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-    from gondola_lib import build_gondolas, summarise
+    from gondola_lib import build_gondolas, is_proposed_scope, summarise
 
 
 try:
@@ -47,6 +47,9 @@ except Exception:
 DXF_FILE_PATH = r"C:\Users\msharan\OneDrive - Kmart Australia Limited\Desktop\Stores Foundry\PPT , Requirements, Demo videos, Pics\1131 Marrickville-Existing plan trace exercise_2 - Floor Plan - 1-0 EXISTING CONDITIONS - GROUND.dxf"
 
 OUTPUT_JSON = r"C:\Users\msharan\OneDrive - Kmart Australia Limited\Desktop\Stores Foundry\Tracing\json\gondola_data_Marrickville_New2.json"
+
+# Never explode proposed / selling-floor XREFs or leftover proposed blocks.
+EXISTING_ONLY = True
 
 
 def _entity_point(entity):
@@ -131,6 +134,12 @@ def _collect_entity(entity, collector, depth=0):
         return
 
     if dxftype == "INSERT":
+        try:
+            block_name = entity.dxf.name
+        except Exception:
+            block_name = ""
+        if EXISTING_ONLY and is_proposed_scope(block_name):
+            return
         _walk_insert(entity, collector, depth)
 
 
@@ -141,6 +150,10 @@ def collect_dxf_labels(dxf_path):
 
     doc = ezdxf.readfile(dxf_path)
     print("DXF loaded!")
+    if EXISTING_ONLY and is_proposed_scope(dxf_path):
+        print("WARNING: DXF path looks like a Proposed / selling-floor file.")
+        print("Tracing must use the Existing Conditions drawing only.")
+        print("")
     print("")
 
     labels = []
@@ -165,6 +178,8 @@ def collect_dxf_labels(dxf_path):
             except Exception:
                 continue
             if name.startswith("*"):
+                continue
+            if EXISTING_ONLY and is_proposed_scope(name):
                 continue
             for entity in block_def:
                 try:

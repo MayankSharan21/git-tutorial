@@ -43,7 +43,7 @@ The 5 Oct 2026 run placed **1526 / 1593** items and every family landed at **0°
 - Uses `revit_angle` / `angle` / `orientation_angle` only. Ignores text `rotation`.
 - Looks up TYPE_MAP case-insensitively (`6WAY` works).
 - Falls back to loaded End_Panel types when `End_Panel_Decks` types are missing.
-- Keeps `LEVEL_NAME` instead of switching to the overlay view’s proposed level.
+- `EXISTING_ONLY = True`: refuses Proposed levels, overlay views, and the selling-floor CAD. Places only on Existing.
 - Prefers the CAD link whose name contains “Existing Conditions”.
 
 ## How to run
@@ -52,7 +52,8 @@ The 5 Oct 2026 run placed **1526 / 1593** items and every family landed at **0°
 2. `pip install ezdxf` if needed, then run the detector.
 3. Confirm the report: unmatched SIZE/TYPE lines should be near zero, and wall runs should show `NEIGHBOR_RUN` with 0° / 90° / 45° / 135° axes.
 4. Paste `Dynamo_ExistingGondolaPlacement.py` into Dynamo. Set `JSON_PATH` and `LEVEL_NAME` if this store uses different names.
-5. Run once. The script deletes previously managed gondolas on that level / Existing phase before placing.
+5. Leave `EXISTING_ONLY = True`. The script refuses Proposed levels, overlay views, and the selling-floor CAD link.
+6. Run once. The script deletes previously managed gondolas on that Existing level / Existing phase before placing.
 
 ## Tests
 

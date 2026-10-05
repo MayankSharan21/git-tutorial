@@ -48,6 +48,9 @@ LEVEL_NAME = "00-GROUND"
 CAD_LINK_NAME = ""
 MM_TO_FT = 1.0 / 304.8
 
+# Hard rule: place only on Existing. Never Proposed, selling-floor, or overlay.
+EXISTING_ONLY = True
+
 USE_JSON_ANGLE = True
 ANGLE_SIGN = 1.0
 ANGLE_OFFSET_DEG = 0.0
@@ -593,6 +596,62 @@ def names_match(left, right):
     )
 
 
+def classify_revit_name(name):
+    text = str(name or "").strip().lower()
+    if not text:
+        return "neutral"
+    if "overlay" in text:
+        return "overlay"
+    if "existing" in text and "proposed" in text:
+        return "overlay"
+    if "proposed" in text or "selling floor" in text or "selling-floor" in text:
+        return "proposed"
+    if "exist" in text or "as-built" in text or "as built" in text:
+        return "existing"
+    return "neutral"
+
+
+def is_proposed_scope(name):
+    return classify_revit_name(name) in ("proposed", "overlay")
+
+
+def choose_existing_level_name(level_names, preferred=""):
+    names = [str(name) for name in level_names if name]
+    preferred_l = str(preferred or "").strip().lower()
+
+    def allowed(name):
+        return classify_revit_name(name) not in ("proposed", "overlay")
+
+    for name in names:
+        if name.strip().lower() == preferred_l and allowed(name):
+            return name
+    for name in names:
+        if classify_revit_name(name) == "existing" and "ground" in name.lower():
+            return name
+    for name in names:
+        if classify_revit_name(name) == "existing":
+            return name
+    return None
+
+
+def choose_existing_view_name(views, level_name):
+    ranked = []
+    for view_name, view_level in views:
+        if str(view_level) != str(level_name):
+            continue
+        scope = classify_revit_name(view_name)
+        if scope in ("proposed", "overlay"):
+            continue
+        ranked.append((scope, str(view_name)))
+    for scope, view_name in ranked:
+        if scope == "existing" and "condition" in view_name.lower():
+            return view_name
+    for scope, view_name in ranked:
+        if scope == "existing":
+            return view_name
+    return None
+
+
 # ---------------------------------------------------------------------------
 # JSON
 # ---------------------------------------------------------------------------
@@ -660,40 +719,37 @@ for imp in all_imports:
             )
         )
 
-        lowered = cad_name_str.lower()
-        if CAD_LINK_NAME and CAD_LINK_NAME.lower() not in lowered:
+        if CAD_LINK_NAME and CAD_LINK_NAME.lower() not in cad_name_str.lower():
             continue
+
+        if EXISTING_ONLY and is_proposed_scope(cad_name_str):
+            continue
+
+        cad_offset_info_text = (
+            "[{}] {} | offset=({:.3f},{:.3f}) ft "
+            "= ({:.0f},{:.0f}) mm | rotation={:.3f}°"
+        ).format(
+            link_type, cad_name_str, ox, oy,
+            ox * 304.8, oy * 304.8, math.degrees(cad_angle),
+        )
 
         if selected_import is None:
             selected_import = imp
             cad_offset_x = ox
             cad_offset_y = oy
             cad_rotation_rad = cad_angle
-            cad_offset_info = (
-                "[{}] {} | offset=({:.3f},{:.3f}) ft "
-                "= ({:.0f},{:.0f}) mm | rotation={:.3f}°"
-            ).format(
-                link_type, cad_name_str, ox, oy,
-                ox * 304.8, oy * 304.8, math.degrees(cad_angle),
-            )
+            cad_offset_info = cad_offset_info_text
 
         if (
             preferred_import is None
-            and "existing" in lowered
-            and "condition" in lowered
+            and classify_revit_name(cad_name_str) == "existing"
         ):
             preferred_import = imp
             cad_offset_x = ox
             cad_offset_y = oy
             cad_rotation_rad = cad_angle
             selected_import = imp
-            cad_offset_info = (
-                "[{}] {} | offset=({:.3f},{:.3f}) ft "
-                "= ({:.0f},{:.0f}) mm | rotation={:.3f}°"
-            ).format(
-                link_type, cad_name_str, ox, oy,
-                ox * 304.8, oy * 304.8, math.degrees(cad_angle),
-            )
+            cad_offset_info = cad_offset_info_text
     except Exception as ex:
         all_cad_found.append("    CAD ERROR: {}".format(str(ex)))
 
@@ -757,7 +813,7 @@ for code, mapping in sorted(TYPE_MAP_NORM.items()):
 
 
 # ---------------------------------------------------------------------------
-# Level — honour LEVEL_NAME; do not steal the overlay view's level
+# Level / view — Existing only. Never Proposed or overlay.
 # ---------------------------------------------------------------------------
 
 all_levels = list(FilteredElementCollector(doc).OfClass(Level))
@@ -769,64 +825,59 @@ for level in all_levels:
     except Exception:
         pass
 
-target_level = level_map.get(LEVEL_NAME)
-if target_level is None:
-    for name, level in level_map.items():
-        if name.strip().lower() == LEVEL_NAME.strip().lower():
-            target_level = level
-            break
-if target_level is None:
-    for name, level in level_map.items():
-        if "ground" in name.lower() and "existing" in name.lower():
-            target_level = level
-            break
-if target_level is None:
+if EXISTING_ONLY and is_proposed_scope(LEVEL_NAME):
     raise Exception(
-        "Level '{}' not found.\n\nAvailable levels:\n{}".format(
+        "LEVEL_NAME '{}' is a Proposed / overlay level.\n"
+        "Tracing must be placed on an Existing level only.\n\n"
+        "Available levels:\n{}".format(
             LEVEL_NAME,
             "\n".join("  " + name for name in sorted(level_map.keys())),
         )
     )
 
-all_views = list(FilteredElementCollector(doc).OfClass(ViewPlan))
-target_view = None
+chosen_level_name = choose_existing_level_name(level_map.keys(), LEVEL_NAME)
+target_level = level_map.get(chosen_level_name) if chosen_level_name else None
 
-
-def _is_overlay_view(name):
-    lowered = str(name or "").lower()
-    return "overlay" in lowered or (
-        "existing" in lowered and "proposed" in lowered
+if target_level is None:
+    raise Exception(
+        "No Existing level found. Tracing will not use a Proposed level.\n"
+        "Set LEVEL_NAME to an Existing level.\n\n"
+        "Available levels:\n{}".format(
+            "\n".join("  " + name for name in sorted(level_map.keys()))
+        )
     )
 
+if EXISTING_ONLY and is_proposed_scope(target_level.Name):
+    raise Exception(
+        "Refusing to place on '{}'. Existing-only tracing is enabled.".format(
+            target_level.Name
+        )
+    )
 
+all_views = list(FilteredElementCollector(doc).OfClass(ViewPlan))
+view_records = []
+view_by_name = {}
 for view in all_views:
     try:
-        if view.GenLevel is None or view.GenLevel.Id != target_level.Id:
+        if view.GenLevel is None:
             continue
-        name = str(view.Name)
-        if _is_overlay_view(name):
-            continue
-        lowered = name.lower()
-        if "existing" in lowered and "condition" in lowered:
-            target_view = view
-            break
+        view_records.append((str(view.Name), str(view.GenLevel.Name)))
+        view_by_name[str(view.Name)] = view
     except Exception:
         pass
-if target_view is None:
-    for view in all_views:
-        try:
-            if view.GenLevel is None or view.GenLevel.Id != target_level.Id:
-                continue
-            name = str(view.Name)
-            if _is_overlay_view(name):
-                continue
-            if "existing" in name.lower():
-                target_view = view
-                break
-        except Exception:
-            pass
 
-level_override_info = "Matched LEVEL_NAME"
+chosen_view_name = choose_existing_view_name(view_records, target_level.Name)
+target_view = view_by_name.get(chosen_view_name) if chosen_view_name else None
+
+if target_view is not None and EXISTING_ONLY and is_proposed_scope(target_view.Name):
+    target_view = None
+
+level_override_info = (
+    "Existing only. Level='{}'. View='{}'".format(
+        target_level.Name,
+        target_view.Name if target_view is not None else "none (no Existing view)",
+    )
+)
 
 
 # ---------------------------------------------------------------------------
@@ -1076,6 +1127,7 @@ lines = [
     "Deleted previous       : {}".format(deleted_count),
     "",
     "LEVEL",
+    "  Existing only        : {}".format(EXISTING_ONLY),
     "  Level used           : {}".format(target_level.Name),
     "  Elevation            : {:.3f} ft".format(target_level.Elevation),
     "  Level note           : {}".format(level_override_info),

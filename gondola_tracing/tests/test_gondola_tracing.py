@@ -9,10 +9,14 @@ from gondola_lib import (
     apply_orientations,
     build_gondolas,
     canonical_code,
+    choose_existing_level_name,
+    choose_existing_view_name,
+    classify_revit_name,
     expand_raw_labels,
     get_orientation,
     identify_text,
     is_noise_label,
+    is_proposed_scope,
     match_size_type,
     merge_nearby_phrases,
     normalize_line_angle,
@@ -65,6 +69,72 @@ class TextCleanupTests(unittest.TestCase):
         ])
         self.assertEqual(len(merged), 1)
         self.assertEqual(canonical_code(merged[0]["text"]), "STRAIGHT RAIL")
+
+
+class ExistingOnlyScopeTests(unittest.TestCase):
+    def test_classifies_marrickville_names(self):
+        self.assertEqual(
+            classify_revit_name("2.0 PROPOSED SELLING FLOOR PLAN- GROUND"),
+            "proposed",
+        )
+        self.assertEqual(
+            classify_revit_name("5.0 OVERLAY- EXISTING & PROPOSED PLAN"),
+            "overlay",
+        )
+        self.assertEqual(
+            classify_revit_name("1-0 EXISTING CONDITIONS - GROUND"),
+            "existing",
+        )
+        self.assertEqual(
+            classify_revit_name("1131_Marrickville_Selling floor.dwg"),
+            "proposed",
+        )
+        self.assertEqual(
+            classify_revit_name("1131_Marrickville_BLD_Existing Conditions.dwg"),
+            "existing",
+        )
+        self.assertTrue(is_proposed_scope("2.0 PROPOSED SELLING FLOOR PLAN- GROUND"))
+        self.assertFalse(is_proposed_scope("00-GROUND"))
+
+    def test_never_chooses_proposed_level(self):
+        levels = [
+            "2.0 PROPOSED SELLING FLOOR PLAN- GROUND",
+            "00-GROUND",
+            "1-0 EXISTING CONDITIONS - GROUND",
+        ]
+        self.assertEqual(
+            choose_existing_level_name(levels, "00-GROUND"),
+            "00-GROUND",
+        )
+        self.assertEqual(
+            choose_existing_level_name(levels, "2.0 PROPOSED SELLING FLOOR PLAN- GROUND"),
+            "1-0 EXISTING CONDITIONS - GROUND",
+        )
+        self.assertIsNone(
+            choose_existing_level_name(
+                ["2.0 PROPOSED SELLING FLOOR PLAN- GROUND"],
+                "2.0 PROPOSED SELLING FLOOR PLAN- GROUND",
+            )
+        )
+
+    def test_never_chooses_overlay_view(self):
+        views = [
+            ("5.0 OVERLAY- EXISTING & PROPOSED PLAN", "00-GROUND"),
+            ("2.0 PROPOSED SELLING FLOOR PLAN- GROUND", "00-GROUND"),
+            ("1-0 EXISTING CONDITIONS - GROUND", "00-GROUND"),
+        ]
+        self.assertEqual(
+            choose_existing_view_name(views, "00-GROUND"),
+            "1-0 EXISTING CONDITIONS - GROUND",
+        )
+
+    def test_drops_proposed_layer_even_without_existing_tag(self):
+        raw = [
+            {"text": "15FMCA", "x": 0, "y": 0, "rotation": 0, "layer": "PROPOSED"},
+        ]
+        gondolas, diag = build_gondolas(raw)
+        self.assertEqual(gondolas, [])
+        self.assertEqual(diag["dropped_proposed_layer"], 1)
 
 
 class OverlayDedupTests(unittest.TestCase):
