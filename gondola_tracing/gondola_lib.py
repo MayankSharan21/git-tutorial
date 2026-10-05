@@ -702,39 +702,25 @@ def island_is_local(labels):
 
 def pick_label_set(modelspace_labels, leftover_labels):
     """
-    Use exactly one coordinate island.
+    Original collector that filled the floor: leftover blocks win.
 
-    The first Marrickville run that filled the floor used leftover-block
-    LOCAL coordinates (a few metres to ~80 m). Dynamo then added the
-    Existing Conditions CAD offset. Later collectors mixed those leftover
-    SIZE+TYPE labels with XREF world coordinates (~275 m). Mixing drops
-    the leftover pairs and under-traces the plan.
+    The first Marrickville run (1526/1593, coverage good, orientation
+    wrong) always scanned leftover block definitions and used those
+    LOCAL SIZE+TYPE labels. Later collectors mixed them with XREF
+    world coordinates and under-traced the plan.
 
-    Prefer leftover when it is local and would place at least as many
-    families as modelspace. Never merge two islands.
+    If leftover has any gondola codes, use leftover only. Never merge
+    leftover local millimetres with world-space modelspace labels.
     """
-    model_island = richest_label_island(modelspace_labels)
     leftover_island = richest_label_island(leftover_labels)
-    model_yield = estimated_gondola_yield(model_island)
-    leftover_yield = estimated_gondola_yield(leftover_island)
+    if estimated_gondola_yield(leftover_island) > 0:
+        return list(leftover_island), "leftover-always"
 
-    if leftover_yield == 0:
-        return list(model_island), "modelspace"
-    if model_yield == 0:
-        return list(leftover_island), "leftover"
-
-    leftover_local = island_is_local(leftover_island)
-
-    # Local leftover is the first-version path. Accept it when it covers
-    # at least 80% of the XREF yield so overlay FULL codes cannot steal
-    # the island and drop SIZE+TYPE pairs.
-    if leftover_local and leftover_yield >= max(1, int(model_yield * 0.8)):
-        return list(leftover_island), "leftover-local"
-    if leftover_yield > model_yield:
-        return list(leftover_island), "leftover-richer"
-
+    model_island = richest_label_island(modelspace_labels)
     extra = compatible_leftover_labels(model_island, leftover_labels)
-    return list(model_island) + extra, "modelspace+compatible"
+    if extra and estimated_gondola_yield(model_island) > 0:
+        return list(model_island) + extra, "modelspace+compatible"
+    return list(model_island), "modelspace"
 
 
 def compatible_leftover_labels(base_labels, extra_labels, pad_mm=80000.0):

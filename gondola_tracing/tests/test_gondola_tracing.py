@@ -275,12 +275,12 @@ class ExistingOnlyScopeTests(unittest.TestCase):
         self.assertEqual(len(kept), 1)
         self.assertEqual(kept[0]["text"], "15F")
 
-    def test_prefers_local_leftover_when_it_fills_more_bays(self):
-        # First Marrickville success: leftover SIZE+TYPE in local mm.
-        # XREF modelspace only had a thinner world-space FULL-code set.
+    def test_original_leftover_always_wins_even_when_world_has_more_codes(self):
+        # First Marrickville File1: leftover SIZE+TYPE in local mm always
+        # won. Do not let a thicker XREF FULL-code set steal the island.
         model = [
-            {"text": "15FMCA", "x": 275000, "y": 20000},
-            {"text": "21FMCS", "x": 276200, "y": 20000},
+            {"text": "15FMCA", "x": 275000 + i * 1200, "y": 20000}
+            for i in range(5)
         ]
         leftover = []
         for i, (size, typ) in enumerate((
@@ -289,11 +289,10 @@ class ExistingOnlyScopeTests(unittest.TestCase):
             leftover.append({"text": size, "x": 400 + i * 1200, "y": 200})
             leftover.append({"text": typ, "x": 400 + i * 1200, "y": 0})
         picked, source = pick_label_set(model, leftover)
-        self.assertEqual(source, "leftover-local")
+        self.assertEqual(source, "leftover-always")
         self.assertEqual(len(picked), 8)
         self.assertTrue(all(float(lab["x"]) < 100000 for lab in picked))
         self.assertEqual(estimated_gondola_yield(picked), 4)
-        self.assertGreater(estimated_gondola_yield(leftover), estimated_gondola_yield(model))
 
     def test_does_not_mix_local_leftover_into_world_modelspace(self):
         model = [{"text": "15FMCA", "x": 275000, "y": 20000}]
@@ -301,33 +300,18 @@ class ExistingOnlyScopeTests(unittest.TestCase):
             {"text": "15F", "x": 400, "y": 200},
             {"text": "MCA", "x": 400, "y": 0},
         ]
-        # Equal yield (1 family). Leftover is local, so pick leftover only.
         picked, source = pick_label_set(model, leftover)
-        self.assertEqual(source, "leftover-local")
+        self.assertEqual(source, "leftover-always")
         self.assertTrue(all(float(lab["x"]) < 100000 for lab in picked))
         xs = [float(lab["x"]) for lab in picked]
         self.assertLess(max(xs) - min(xs), 50000)
 
-    def test_prefers_local_leftover_when_world_has_only_a_few_more_codes(self):
-        model = [
-            {"text": "15FMCA", "x": 275000 + i * 1200, "y": 20000}
-            for i in range(5)
-        ]
-        leftover = []
-        for i in range(4):
-            leftover.append({"text": "15F", "x": 400 + i * 1200, "y": 200})
-            leftover.append({"text": "MCA", "x": 400 + i * 1200, "y": 0})
-        picked, source = pick_label_set(model, leftover)
-        self.assertEqual(source, "leftover-local")
-        self.assertEqual(estimated_gondola_yield(picked), 4)
-
-    def test_merges_leftover_on_the_same_world_island(self):
+    def test_uses_modelspace_only_when_leftover_has_no_codes(self):
         model = [{"text": "15FMCA", "x": 275000, "y": 20000}]
-        leftover = [{"text": "21FMCS", "x": 276200, "y": 20100}]
+        leftover = [{"text": "1-0 EXISTING CONDITIONS - GROUND", "x": 400, "y": 200}]
         picked, source = pick_label_set(model, leftover)
-        self.assertEqual(source, "modelspace+compatible")
-        texts = sorted(lab["text"] for lab in picked)
-        self.assertEqual(texts, ["15FMCA", "21FMCS"])
+        self.assertEqual(source, "modelspace")
+        self.assertEqual(picked[0]["text"], "15FMCA")
 
     def test_uses_leftover_when_modelspace_has_no_codes(self):
         leftover = [{"text": "15FMCA", "x": 400, "y": 200}]
@@ -335,7 +319,7 @@ class ExistingOnlyScopeTests(unittest.TestCase):
             [{"text": "1-0 EXISTING CONDITIONS - GROUND", "x": 0, "y": 0}],
             leftover,
         )
-        self.assertEqual(source, "leftover")
+        self.assertEqual(source, "leftover-always")
         self.assertEqual(picked[0]["text"], "15FMCA")
 
     def test_skips_cad_offset_when_json_already_in_world_space(self):

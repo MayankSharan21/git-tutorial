@@ -33,7 +33,7 @@ The 5 Oct 2026 run placed **1526 / 1593** items and every family landed at **0°
 ## What the new detector does
 
 - Cleans MTEXT formatting and split labels (`15F` + `MCA`, `15F\PMCA`).
-- Walks leftover block definitions first when those local SIZE+TYPE labels fill more bays than modelspace XREF world coordinates. That is the first Marrickville path (local mm + CAD offset). It never mixes the two islands.
+- Restores the original leftover-block collector (the run that traced most bays). Leftover SIZE+TYPE in local mm always wins; it is never mixed with XREF world coordinates. Dynamo adds the CAD offset. Orientation still comes from neighbour-run voting, not DXF text rotation.
 - Matches SIZE+TYPE with mutual nearest-neighbour and a ~700 mm stack window so adjacent 1200 mm bays are not paired.
 - Infers orientation from neighbouring bay centres (1200 / 1500 / 1800 mm runs). This is what aligns the Marrickville south wall, west wall, and 45° corner.
 - Writes three angle fields:
@@ -52,7 +52,7 @@ The 5 Oct 2026 run placed **1526 / 1593** items and every family landed at **0°
 
 ## How to run
 
-1. Replace **both** files. Dynamo must report `2026-10-05j-leftover-primary`. Re-run the detector so it writes `gondola_data_Marrickville_New4.json` from leftover-block local coordinates, then run Dynamo. Do not reuse New2 / New3 — those mixed world-space XREF labels and under-traced the floor.
+1. Replace **both** files. Dynamo must report `2026-10-05k-original-collect`. Re-run the detector so it writes `gondola_data_Marrickville_New4.json` from the original leftover-block collector (the run that filled most bays), then run Dynamo. Do not reuse New2 / New3.
 2. Copy only `Gondola_OrientationDetector.py` into the Tracing folder. It is standalone — an old `gondola_lib.py` in that folder is ignored.
 3. Edit `DXF_FILE_PATH` and `OUTPUT_JSON` at the top of `Gondola_OrientationDetector.py`. Use the Existing Conditions GROUND DXF.
 4. `pip install ezdxf` if needed, then run the detector.

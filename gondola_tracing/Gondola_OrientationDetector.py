@@ -4,9 +4,9 @@
 # This file does not need gondola_lib.py. If an old gondola_lib.py is
 # sitting in the same folder, it is ignored.
 #
-# Version 2026-10-05j-leftover-primary
-# Uses leftover-block LOCAL coordinates when they fill more bays than
-# modelspace XREF world coordinates. Dynamo then adds the CAD offset.
+# Version 2026-10-05k-original-collect
+# Restores the original leftover-block collector (the run that traced
+# most bays). Orientation is still inferred from neighbour runs.
 # JSON must be gondola_data_Marrickville_New4.json — same path as Dynamo.
 
 import platform as _platform
@@ -732,31 +732,20 @@ def island_is_local(labels):
 
 def pick_label_set(modelspace_labels, leftover_labels):
     """
-    Use exactly one coordinate island.
+    Original collector that filled the floor: leftover blocks win.
 
-    The first Marrickville run that filled the floor used leftover-block
-    LOCAL coordinates. Dynamo then added the Existing Conditions CAD
-    offset. Mixing leftover SIZE+TYPE with XREF world coordinates drops
-    the leftover pairs and under-traces the plan.
+    If leftover has any gondola codes, use leftover only. Never merge
+    leftover local millimetres with world-space modelspace labels.
     """
-    model_island = richest_label_island(modelspace_labels)
     leftover_island = richest_label_island(leftover_labels)
-    model_yield = estimated_gondola_yield(model_island)
-    leftover_yield = estimated_gondola_yield(leftover_island)
+    if estimated_gondola_yield(leftover_island) > 0:
+        return list(leftover_island), "leftover-always"
 
-    if leftover_yield == 0:
-        return list(model_island), "modelspace"
-    if model_yield == 0:
-        return list(leftover_island), "leftover"
-
-    leftover_local = island_is_local(leftover_island)
-    if leftover_local and leftover_yield >= max(1, int(model_yield * 0.8)):
-        return list(leftover_island), "leftover-local"
-    if leftover_yield > model_yield:
-        return list(leftover_island), "leftover-richer"
-
+    model_island = richest_label_island(modelspace_labels)
     extra = compatible_leftover_labels(model_island, leftover_labels)
-    return list(model_island) + extra, "modelspace+compatible"
+    if extra and estimated_gondola_yield(model_island) > 0:
+        return list(model_island) + extra, "modelspace+compatible"
+    return list(model_island), "modelspace"
 
 
 def compatible_leftover_labels(base_labels, extra_labels, pad_mm=80000.0):
@@ -1310,7 +1299,7 @@ OUTPUT_JSON = r"C:\Users\msharan\OneDrive - Kmart Australia Limited\Desktop\Stor
 # Prefer Existing-named sources. Never write an empty JSON just because
 # the only XREF or leftover block is named Selling floor / Overlay.
 EXISTING_ONLY = True
-SCRIPT_VERSION = "2026-10-05j-leftover-primary"
+SCRIPT_VERSION = "2026-10-05k-original-collect"
 
 
 def _entity_point(entity):
@@ -1411,25 +1400,29 @@ def _collect_entity(entity, collector, depth=0, block_name=""):
         _walk_insert(entity, collector, depth, scope_name)
 
 
-def _scan_leftover_blocks(doc, skip_proposed=True):
+def _scan_leftover_blocks(doc):
+    """
+    Original leftover scan from the run that filled most bays.
+
+    Every named block, local block coordinates, no proposed-name skip.
+    Star blocks (*Model_Space, *U…) are skipped the same way as File1.
+    Labels do not carry a block name, so a Selling-floor leftover is
+    not dropped by the Existing-only source filter.
+    """
     extra = []
     seen = set()
-    skipped_proposed = 0
     for block_def in doc.blocks:
         try:
             name = block_def.name
         except Exception:
             continue
-        if is_layout_block(name):
-            continue
-        if skip_proposed and EXISTING_ONLY and is_proposed_scope(name):
-            skipped_proposed += 1
+        if str(name).startswith("*"):
             continue
         for entity in block_def:
             try:
                 if entity.dxftype() not in ("TEXT", "MTEXT", "ATTRIB", "ATTDEF"):
                     continue
-                label = _as_label(entity, name)
+                label = _as_label(entity)
                 if label is None:
                     continue
                 key = (round(label["x"], 1), round(label["y"], 1), label["text"])
@@ -1439,7 +1432,7 @@ def _scan_leftover_blocks(doc, skip_proposed=True):
                 seen.add(key)
             except Exception:
                 pass
-    return extra, skipped_proposed
+    return extra
 
 
 def collect_dxf_labels(dxf_path):
@@ -1465,18 +1458,9 @@ def collect_dxf_labels(dxf_path):
             pass
     print("Modelspace labels : {}".format(len(labels)))
 
-    leftover_used = 0
-    print("Scanning leftover block definitions (first-version path)...")
-    extra, skipped_proposed = _scan_leftover_blocks(doc, skip_proposed=True)
-    print(
-        "Leftover existing/unknown: {}  skipped proposed-named: {}".format(
-            len(extra), skipped_proposed
-        )
-    )
-    if not has_classified_gondola(extra):
-        print("Existing-named leftover has no gondola codes. Including all leftover blocks...")
-        extra, _ = _scan_leftover_blocks(doc, skip_proposed=False)
-        print("Leftover all-named blocks: {}".format(len(extra)))
+    print("Scanning leftover block definitions (original File1 path)...")
+    extra = _scan_leftover_blocks(doc)
+    print("Leftover labels         : {}".format(len(extra)))
 
     labels, island_source = pick_label_set(labels, extra)
     leftover_used = estimated_gondola_yield(extra)
@@ -1500,7 +1484,16 @@ def collect_dxf_labels(dxf_path):
         else:
             print("Island coordinates      : WORLD (Dynamo will skip the CAD offset)")
 
-    labels, source_info = keep_existing_source_labels(labels, EXISTING_ONLY)
+    before_filter = estimated_gondola_yield(labels)
+    filtered, source_info = keep_existing_source_labels(labels, EXISTING_ONLY)
+    if estimated_gondola_yield(filtered) >= max(1, int(before_filter * 0.8)):
+        labels = filtered
+    else:
+        print("Keeping leftover-always set; Existing source filter would drop too many labels.")
+        source_info = {
+            "dropped_proposed_source": 0,
+            "kept_source": len(labels),
+        }
     print("Labels after source filter: {}".format(len(labels)))
     print("Dropped proposed-named source: {}".format(source_info["dropped_proposed_source"]))
     print("Leftover yield          : {}".format(leftover_used))
