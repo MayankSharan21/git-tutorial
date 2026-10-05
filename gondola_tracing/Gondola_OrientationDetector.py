@@ -1,17 +1,39 @@
 # Gondola_OrientationDetector.py
 #
-# Standalone VS Code / system Python script. Do not run in Dynamo.
-# This file does not need gondola_lib.py. If an old gondola_lib.py is
-# sitting in the same folder, it is ignored.
+# Original File1 collector (the run that filled most bays).
+# Version 2026-10-05m-original-files
 #
-# Version 2026-10-05k-original-collect
-# Restores the original leftover-block collector (the run that traced
-# most bays). Orientation is still inferred from neighbour runs.
-# JSON must be gondola_data_Marrickville_New4.json — same path as Dynamo.
+# Only orientation is corrected after collect:
+#   leftover named blocks + modelspace TEXT, MATCH_DIST 1500,
+#   family XY = SIZE label. Neighbour-run writes revit_angle.
+#
+# Purpose:
+#   1. Read gondola labels from a DXF file.
+#   2. Detect complete gondola codes.
+#   3. Detect SIZE + TYPE combinations.
+#   4. Determine the physical tracing direction.
+#   5. Store the actual tracing angle as "orientation_angle".
+#   6. Export the gondola data to JSON for Dynamo/Revit placement.
+#
+# Important:
+#   orientation_angle is the actual DXF tracing direction:
+#
+#       0°   = +X direction
+#       90°  = +Y direction
+#       45°  = diagonal
+#
+#   The Dynamo placement script can then convert this physical
+#   tracing angle into the required Revit family rotation.
+
+
+# ============================================================
+# PLATFORM PATCH
+# ============================================================
 
 import platform as _platform
 
 if not hasattr(_platform, "_patched"):
+
     _orig = _platform._syscmd_ver
 
     def _safe_syscmd_ver(*a, **kw):
@@ -23,1062 +45,1140 @@ if not hasattr(_platform, "_patched"):
     _platform._syscmd_ver = _safe_syscmd_ver
     _platform._patched = True
 
-import json
-import math
-import os
-import re
-import sys
-from collections import defaultdict
+
+# ============================================================
+# IMPORTS
+# ============================================================
 
 import ezdxf
+import json
+import sys
+import math
+
 
 try:
-    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stdout.reconfigure(
+        encoding="utf-8",
+        errors="replace"
+    )
 except Exception:
     pass
 
 
-# ---------------------------------------------------------------------------
-# Bundled tracing helpers (copied so this file runs alone)
-# ---------------------------------------------------------------------------
+# ============================================================
+# FILE PATHS
+# ============================================================
 
-import math
-import re
-from collections import defaultdict
+DXF_FILE_PATH = r"C:\Users\msharan\OneDrive - Kmart Australia Limited\Desktop\Stores Foundry\PPT , Requirements, Demo videos, Pics\1131 Marrickville-Existing plan trace exercise_2 - Floor Plan - 1-0 EXISTING CONDITIONS - GROUND.dxf"
+
+OUTPUT_JSON = r"C:\Users\msharan\OneDrive - Kmart Australia Limited\Desktop\Stores Foundry\Tracing\json\gondola_data_Marrickville_New4.json"
+SCRIPT_VERSION = "2026-10-05m-original-files"
 
 
-# ---------------------------------------------------------------------------
-# Catalogues
-# ---------------------------------------------------------------------------
+# ============================================================
+# SIZE CODES
+# ============================================================
 
 SIZE_CODES = {
-    "15F", "21F", "34F", "34H", "34S", "36W", "36B", "18F", "12W", "15W",
-    "27H", "28F", "42F", "21H", "12F", "36H", "34W", "32W", "30W", "27W",
-    "21W", "12Q", "26", "27", "30", "32", "34B",
+    "15F",
+    "21F",
+    "34F",
+    "34H",
+    "34S",
+    "36W",
+    "36B",
+    "18F",
+    "12W",
+    "15W",
+    "27H",
+    "28F",
+    "42F",
+    "21H"
+}
+
+
+# ============================================================
+# TYPE CODES
+# ============================================================
+
+TYPE_CODES = {
+    "MCA",
+    "MCS",
+    "LCA",
+    "LCS",
+    "MOA",
+    "MOS",
+    "LOA",
+    "LOS",
+    "MGA",
+    "MGS",
+    "WCA",
+    "WCS",
+    "WOA",
+    "WOS",
+    "MWA",
+    "MWS"
+}
+
+
+# ============================================================
+# COMPLETE / SPECIAL GONDOLA CODES
+# ============================================================
+
+FULL_CODES = {
+
+    "15FLCA",
+    "15FLCS",
+    "15FLOA",
+    "15FLOS",
+    "15FMCA",
+    "15FMCS",
+    "15FMOA",
+    "15FMOS",
+
+    "18FLCA",
+    "18FLCS",
+    "18FMCA",
+    "18FMCS",
+    "18FMOA",
+    "18FMOS",
+
+    "21FLCA",
+    "21FLCS",
+    "21FLOA",
+    "21FLOS",
+    "21FMCA",
+    "21FMCS",
+    "21FMOA",
+    "21FMOS",
+
+    "34FLCA",
+    "34FLCS",
+    "34FLOA",
+    "34FLOS",
+    "34FMCA",
+    "34FMCS",
+    "34FMOA",
+    "34FMOS",
+
+    "34HLCA",
+    "34HLCS",
+    "34HLOA",
+    "34HLOS",
+
+    "27HLCA",
+    "27HLCS",
+
+    "34SLCA",
+    "34SLCS",
+
+    "34RDLC",
+
+    "FLATDECK",
+    "FLATDECKWS",
+
+    "36WLOA",
+    "36WLOS",
+    "36WLCA",
+    "36WLCS",
+    "15WLOS",
+
+    "36BLOA",
+    "36BLOS",
+    "36BLCA",
+    "36BLCS",
+
+    "15WLCA",
+    "15WLCS",
+    "15WLOS",
+    "15WMCA",
+    "15WMCS",
+
+    "12WMCA",
+    "12WMCS",
+
+    "15FMWA",
+    "15FMWS",
+    "21FMWA",
+    "21FMWS",
+    "34FMWA",
+    "34FMWS",
+
+    "12FLCA",
+    "12FLCS",
+    "12FLOA",
+    "12FLOS",
+    "12FMCA",
+    "12FMCS",
+    "12FMOA",
+    "12FMOS",
+
+    "36HLCA",
+    "36HLCS",
+    "36HLOA",
+    "36HLOS",
+
+    "34WLOA",
+    "34WLOS",
+    "34WLCA",
+    "34WLCS",
+
+    "32WLOA",
+    "32WLOS",
+    "32WLCA",
+    "32WLCS",
+
+    "30WLOA",
+    "30WLOS",
+    "30WLCA",
+    "30WLCS",
+
+    "27WLOA",
+    "27WLOS",
+    "27WLCA",
+    "27WLCS",
+
+    "21WLOA",
+    "21WLOS",
+    "21WLCA",
+    "21WLCS",
+
+    "12DELC",
+    "12DEMO",
+    "12ELC",
+    "12ELO",
+    "12EMC",
+    "12EMO",
+    "12SELC",
+    "12SEMC",
+
+    "15DELC",
+    "15DELO",
+    "15DEMC",
+    "15DEMO",
+    "15ELC",
+    "15ELO",
+    "15ELW",
+    "15EMC",
+    "15EMM",
+    "15EMO",
+    "15EMW",
+    "15SELC",
+    "15SELO",
+    "15SEMC",
+    "15SEMO",
+    "15SEMW",
+
+    "18DELC",
+    "18DEMO",
+    "18ELC",
+    "18ELM",
+    "18ELO",
+    "18EMC",
+    "18EMM",
+    "18EMO",
+    "18POSTER END",
+    "18SELC",
+    "18SELO",
+    "18SEMC",
+    "18SEMO",
+
+    "21DELC",
+    "21DELC 200 PEG",
+    "21DELM",
+    "21DELO",
+    "21DEMC",
+    "21DEMO",
+    "21ELC",
+    "21ELM",
+    "21ELO",
+    "21ELW",
+    "21ELWM",
+    "21EMC",
+    "21EMM",
+    "21EMO",
+    "21EMW",
+    "21EMWM",
+    "21POSTER END",
+    "21SELC",
+    "21SELO",
+    "21SELW",
+    "21SEMC",
+    "21SEMO",
+    "21SEMW",
+
+    "26DELW - DIVIDING WALL - END",
+    "26EMW - DIVIDING WALL EPF",
+
+    "27ELC",
+    "27ELO",
+    "27ELW",
+    "27EMC",
+    "27EMO",
+    "27POSTER 540 END",
+    "27SELC",
+    "27SELO",
+    "27SELW",
+
+    "30DELO",
+    "30DEMC",
+    "30DEMO",
+    "30ELC",
+    "30ELM",
+    "30ELO",
+    "30EMC",
+    "30EMM",
+    "30EMO",
+    "30SELC",
+    "30SELO",
+    "30SELW",
+    "30SEMC",
+    "30SEMO",
+
+    "32DELC",
+    "32DELO",
+    "32DEMC",
+    "32DEMO",
+    "32ELC",
+    "32ELM",
+    "32ELO",
+    "32ELW",
+    "32ELWM",
+    "32EMC",
+    "32EMM",
+    "32EMO",
+    "32EMW",
+    "32EMWM",
+    "32SELC",
+    "32SELO",
+    "32SELW",
+    "32SEMC",
+    "32SEMO",
+    "32SEMW",
+
+    "34DELC",
+    "34DELO",
+    "34DEMC",
+    "34DEMO",
+    "34ELC",
+    "34ELM",
+    "34ELO",
+    "34ELW",
+    "34ELWM",
+    "34EMC",
+    "34EMM",
+    "34EMO",
+    "34EMW",
+    "34EMWM",
+    "34SELC",
+    "34SELO",
+    "34SELW",
+    "34SEMC",
+    "34SEMO",
+    "34SEMW",
+    "34SELW 540 END",
+    "34SEMV 540 END",
+
+    "HALLMARK END 1200",
+    "HALLMARK END 900",
+
+    "12QMCA",
+    "12QMCS",
+
+    #OLD CODES
+"15EPLC",
+"15EPMC",
+"15EPMO",
+"15EPLO",
+"15EPMM",
+
+"15SHMC",
+"15SHLC",
+"15SHLO",
+
+"18EPLC",
+"18EPMC",
+"18EPMO",
+"18EPLO",
+"18EPMM",
+
+"18SHMC",
+"18SHLC",
+"18SHLO",
+
+"21EPLC",
+"21EPMC",
+"21EPMO",
+"21EPLO",
+"21EPMM",
+"21SHMC",
+"21SHLC",
+"21SHLO",
+
+"27HLO",
+
+"32EPLC",
+"32EPMC",
+"32EPMO",
+"32EPLO",
+"32SHLO",
+
+"34EPLC",
+"34EPMC",
+"34EPMO",
+"34EPLO",
+"34SHLO",
+
+
+"34BLOA",
+"34BLOS",
+
+"36BLOA",
+"36BLOS",
+
+"15RDLC",
+"15RDLO",
+"15RDMC",
+"15RDMO",
+
+"18RDLC",
+"18RDLO",
+"18RDMC",
+"18RDMO",
+
+"21RDLC",
+"21RDLO",
+"21RDMC",
+"21RDMO",
+
+"32RDLC",
+"32RDLO",
+"32RDMC",
+"32RDMO",
+
+"34RDLC",
+"34RDLO",
+"34RDMC",
+"34RDMO",
+"34RELO",
+
+"FLATDECK W/-SURROUND",
+"FLATDECK",
+"DECK TABLE",
+"HOPPER UNIT 2150H",
+
+
+"HOT SPOT 1500H",
+"HOT SPOT COOKBOOKS",
+"HOT SPOT 2100H",
+"HOT SPOT 3000H",
+"HOT SPOT 3200H",
+"HOT SPOT 3400H",
+
+"Straight rail",
+
+"6Way",
+"16_Way",
+
+"T2 TABLE",
+"T2 ARM ONLY",
+
+"HANGER TOTEM",
+
+}
+
+
+# ============================================================
+# NORMALISE CODES
+# ============================================================
+
+SIZE_CODES = {
+    str(x).upper().strip()
+    for x in SIZE_CODES
 }
 
 TYPE_CODES = {
-    "MCA", "MCS", "LCA", "LCS", "MOA", "MOS", "LOA", "LOS", "MGA", "MGS",
-    "WCA", "WCS", "WOA", "WOS", "MWA", "MWS",
+    str(x).upper().strip()
+    for x in TYPE_CODES
 }
 
 FULL_CODES = {
-    "15FLCA", "15FLCS", "15FLOA", "15FLOS", "15FMCA", "15FMCS", "15FMOA", "15FMOS",
-    "18FLCA", "18FLCS", "18FMCA", "18FMCS", "18FMOA", "18FMOS",
-    "21FLCA", "21FLCS", "21FLOA", "21FLOS", "21FMCA", "21FMCS", "21FMOA", "21FMOS",
-    "34FLCA", "34FLCS", "34FLOA", "34FLOS", "34FMCA", "34FMCS", "34FMOA", "34FMOS",
-    "34HLCA", "34HLCS", "34HLOA", "34HLOS",
-    "27HLCA", "27HLCS",
-    "34SLCA", "34SLCS",
-    "34RDLC",
-    "FLATDECK", "FLATDECKWS",
-    "36WLOA", "36WLOS", "36WLCA", "36WLCS", "15WLOS",
-    "36BLOA", "36BLOS", "36BLCA", "36BLCS",
-    "15WLCA", "15WLCS", "15WLOS", "15WMCA", "15WMCS",
-    "12WMCA", "12WMCS",
-    "15FMWA", "15FMWS", "21FMWA", "21FMWS", "34FMWA", "34FMWS",
-    "12FLCA", "12FLCS", "12FLOA", "12FLOS", "12FMCA", "12FMCS", "12FMOA", "12FMOS",
-    "36HLCA", "36HLCS", "36HLOA", "36HLOS",
-    "34WLOA", "34WLOS", "34WLCA", "34WLCS",
-    "32WLOA", "32WLOS", "32WLCA", "32WLCS",
-    "30WLOA", "30WLOS", "30WLCA", "30WLCS",
-    "27WLOA", "27WLOS", "27WLCA", "27WLCS",
-    "21WLOA", "21WLOS", "21WLCA", "21WLCS",
-    "12DELC", "12DEMO", "12ELC", "12ELO", "12EMC", "12EMO", "12SELC", "12SEMC",
-    "15DELC", "15DELO", "15DEMC", "15DEMO", "15ELC", "15ELO", "15ELW", "15EMC",
-    "15EMM", "15EMO", "15EMW", "15SELC", "15SELO", "15SEMC", "15SEMO", "15SEMW",
-    "18DELC", "18DEMO", "18ELC", "18ELM", "18ELO", "18EMC", "18EMM", "18EMO",
-    "18POSTER END", "18SELC", "18SELO", "18SEMC", "18SEMO",
-    "21DELC", "21DELC 200 PEG", "21DELM", "21DELO", "21DEMC", "21DEMO", "21ELC",
-    "21ELM", "21ELO", "21ELW", "21ELWM", "21EMC", "21EMM", "21EMO", "21EMW",
-    "21EMWM", "21POSTER END", "21SELC", "21SELO", "21SELW", "21SEMC", "21SEMO",
-    "21SEMW",
-    "26DELW - DIVIDING WALL - END", "26EMW - DIVIDING WALL EPF",
-    "27ELC", "27ELO", "27ELW", "27EMC", "27EMO", "27POSTER 540 END",
-    "27SELC", "27SELO", "27SELW",
-    "30DELO", "30DEMC", "30DEMO", "30ELC", "30ELM", "30ELO", "30EMC", "30EMM",
-    "30EMO", "30SELC", "30SELO", "30SELW", "30SEMC", "30SEMO",
-    "32DELC", "32DELO", "32DEMC", "32DEMO", "32ELC", "32ELM", "32ELO", "32ELW",
-    "32ELWM", "32EMC", "32EMM", "32EMO", "32EMW", "32EMWM", "32SELC", "32SELO",
-    "32SELW", "32SEMC", "32SEMO", "32SEMW",
-    "34DELC", "34DELO", "34DEMC", "34DEMO", "34ELC", "34ELM", "34ELO", "34ELW",
-    "34ELWM", "34EMC", "34EMM", "34EMO", "34EMW", "34EMWM", "34SELC", "34SELO",
-    "34SELW", "34SEMC", "34SEMO", "34SEMW", "34SELW 540 END", "34SEMV 540 END",
-    "HALLMARK END 1200", "HALLMARK END 900",
-    "12QMCA", "12QMCS",
-    "15EPLC", "15EPMC", "15EPMO", "15EPLO", "15EPMM",
-    "15SHMC", "15SHLC", "15SHLO",
-    "18EPLC", "18EPMC", "18EPMO", "18EPLO", "18EPMM",
-    "18SHMC", "18SHLC", "18SHLO",
-    "21EPLC", "21EPMC", "21EPMO", "21EPLO", "21EPMM",
-    "21SHMC", "21SHLC", "21SHLO",
-    "27HLO",
-    "32EPLC", "32EPMC", "32EPMO", "32EPLO", "32SHLO",
-    "34EPLC", "34EPMC", "34EPMO", "34EPLO", "34SHLO",
-    "34BLOA", "34BLOS",
-    "36BLOA", "36BLOS",
-    "15RDLC", "15RDLO", "15RDMC", "15RDMO",
-    "18RDLC", "18RDLO", "18RDMC", "18RDMO",
-    "21RDLC", "21RDLO", "21RDMC", "21RDMO",
-    "32RDLC", "32RDLO", "32RDMC", "32RDMO",
-    "34RDLC", "34RDLO", "34RDMC", "34RDMO", "34RELO",
-    "FLATDECK W/-SURROUND", "DECK TABLE", "HOPPER UNIT 2150H",
-    "HOT SPOT 1500H", "HOT SPOT COOKBOOKS", "HOT SPOT 2100H",
-    "HOT SPOT 3000H", "HOT SPOT 3200H", "HOT SPOT 3400H",
-    "STRAIGHT RAIL", "6WAY", "16_WAY",
-    "T2 TABLE", "T2 ARM ONLY", "T2 NO RAIL/ARMS", "T3 TABLE",
-    "HANGER TOTEM",
-    "15WLOA",
-    "27SHLO",
-    "LRD", "LRD_2",
+    str(x).upper().strip()
+    for x in FULL_CODES
 }
 
-# Incoming DXF text -> canonical catalogue code.
-CODE_ALIASES = {
-    "6 WAY": "6WAY",
-    "6-WAY": "6WAY",
-    "6_WAY": "6WAY",
-    "16 WAY": "16_WAY",
-    "16WAY": "16_WAY",
-    "16-WAY": "16_WAY",
-    "STRAIGHT-RAIL": "STRAIGHT RAIL",
-    "STRAIGHTRAIL": "STRAIGHT RAIL",
-    "FLATDECKWS": "FLATDECK W/-SURROUND",
-    "FLATDECK WS": "FLATDECK W/-SURROUND",
-    "FLATDECK W/ SURROUND": "FLATDECK W/-SURROUND",
-    "FLAT DECK": "FLATDECK",
-    "T2TABLE": "T2 TABLE",
-    "T2-TABLE": "T2 TABLE",
-    "T2 ARM": "T2 ARM ONLY",
-    "T2 NORAIL/ARMS": "T2 NO RAIL/ARMS",
-    "T2 NO RAIL ARMS": "T2 NO RAIL/ARMS",
-    "T3TABLE": "T3 TABLE",
-    "LRD": "FLATDECK",
-    "LRD2": "FLATDECK W/-SURROUND",
-    "LRD_2": "FLATDECK W/-SURROUND",
-    "15DEMODE": "15DEMO",
-    "18DEMODE": "18DEMO",
-    "21DEMODE": "21DEMO",
-    "27SHLO": "27SHLO",
-}
 
-# Notes printed next to bays. These are not gondolas.
-IGNORE_LABELS = {
-    "DE", "RD", "VM", "PRICE", "MAN", "NO EPF", "NOEPF",
-    "CLADDED SURROUND", "CLADDED", "SURROUND",
-    "FIXTURE FIXED TO FLOOR", "SEAT", "MIRROR", "BR", "DP", "PS",
-    "ENTRY", "EXIT", "FHR", "HYDRANT", "C.H", "CH",
-    "(VM)", "(PRICE)", "(MAN)", "NO VM RAIL",
-    "2X(595X1195)", "390", "WEIGHTS",
-    "SHOWCASE", "CPV UNIT", "ENERGIZER UNIT", "ENERGIZER",
-    "BULK GOODS BOARD", "FIXTURE CLASHES WITH COLUMN",
-    "CUT ON SITE", "NO EPF",
-}
+# ============================================================
+# MATCHING DISTANCE
+# ============================================================
 
-EXISTING_LAYER_HINTS = ("EXIST", "EXG", "AS-BUILT", "ASBUILT", "X-EXIST")
-PROPOSED_LAYER_HINTS = ("PROPOS", "NEW SELL", "NEW-SELL", "SELLING FLOOR", "FUTURE")
-
-PHRASE_JOINS = (
-    (("STRAIGHT", "RAIL"), "STRAIGHT RAIL"),
-    (("FLATDECK", "W/-SURROUND"), "FLATDECK W/-SURROUND"),
-    (("FLATDECK", "W/- SURROUND"), "FLATDECK W/-SURROUND"),
-    (("HOPPER", "UNIT 2150H"), "HOPPER UNIT 2150H"),
-    (("HOT SPOT", "1500H"), "HOT SPOT 1500H"),
-    (("HOT SPOT", "2100H"), "HOT SPOT 2100H"),
-    (("HOT SPOT", "3000H"), "HOT SPOT 3000H"),
-    (("HOT SPOT", "3200H"), "HOT SPOT 3200H"),
-    (("HOT SPOT", "3400H"), "HOT SPOT 3400H"),
-    (("HOT SPOT", "COOKBOOKS"), "HOT SPOT COOKBOOKS"),
-    (("T2", "NO RAIL/ARMS"), "T2 NO RAIL/ARMS"),
-    (("T2 NO", "RAIL/ARMS"), "T2 NO RAIL/ARMS"),
-    (("T3", "TABLE"), "T3 TABLE"),
-)
-
-OVERLAP_DEDUP_MM = 550.0
-
-# Typical bay centres along a gondola run, millimetres.
-BAY_SPACINGS_MM = (1200.0, 1500.0, 1800.0, 2100.0, 900.0, 2400.0, 600.0)
-BAY_SPACING_TOLERANCE_MM = 280.0
-NEIGHBOR_SEARCH_MM = 2800.0
-TIGHT_PAIR_DIST_MM = 700.0
-LOOSE_PAIR_DIST_MM = 1100.0
-DEDUP_DIST_MM = 80.0
-INHERIT_ORIENT_DIST_MM = 3200.0
-ANGLE_SNAP_DEG = 12.0
+MATCH_DIST = 1500.0
 
 
-def _freeze_catalogues():
-    global SIZE_CODES, TYPE_CODES, FULL_CODES
-    SIZE_CODES = {str(x).upper().strip() for x in SIZE_CODES}
-    TYPE_CODES = {str(x).upper().strip() for x in TYPE_CODES}
-    FULL_CODES = {str(x).upper().strip() for x in FULL_CODES}
-
-    # Pull extra size/type tokens out of complete codes such as 12QMCA.
-    size_pat = re.compile(r"^(\d{2}[A-Z])")
-    for code in list(FULL_CODES):
-        compact = re.sub(r"[^A-Z0-9]", "", code)
-        match = size_pat.match(compact)
-        if not match:
-            continue
-        size = match.group(1)
-        rest = compact[len(size):]
-        if len(size) == 3:
-            SIZE_CODES.add(size)
-        if 2 <= len(rest) <= 4:
-            TYPE_CODES.add(rest)
-
-
-_freeze_catalogues()
-
-
-# ---------------------------------------------------------------------------
-# Text cleanup
-# ---------------------------------------------------------------------------
-
-_MTEXT_GROUP = re.compile(r"\{[^}]*;")
-_MTEXT_CODE = re.compile(r"\\[A-Za-z]+[^;\\]*;")
-_MULTI_SPACE = re.compile(r"\s+")
-
-
-def strip_mtext_codes(text):
-    """Remove AutoCAD MTEXT formatting and keep readable characters."""
-    if text is None:
-        return ""
-
-    text = str(text)
-    text = text.replace("\\P", "\n").replace("\\p", "\n")
-    text = text.replace("\\~", " ")
-    text = _MTEXT_GROUP.sub("", text)
-    text = _MTEXT_CODE.sub("", text)
-    text = text.replace("{", "").replace("}", "")
-    text = text.replace("%%U", "").replace("%%u", "")
-    text = text.replace("%%C", "").replace("%%c", "")
-    return text.strip()
-
-
-def normalize_code(text):
-    """Uppercase, strip formatting, collapse whitespace."""
-    cleaned = strip_mtext_codes(text)
-    cleaned = cleaned.upper().replace("\n", " ")
-    cleaned = cleaned.replace("–", "-").replace("—", "-")
-    cleaned = _MULTI_SPACE.sub(" ", cleaned).strip()
-    return cleaned
-
-
-def compact_code(text):
-    return re.sub(r"[^A-Z0-9]", "", normalize_code(text))
-
-
-def canonical_code(text):
-    """Map a raw label onto a catalogue code when possible."""
-    norm = normalize_code(text)
-    if not norm:
-        return ""
-    if norm in CODE_ALIASES:
-        return CODE_ALIASES[norm]
-    if norm in FULL_CODES:
-        return norm
-
-    compact = compact_code(norm)
-    compact_aliases = {
-        compact_code(src): dst
-        for src, dst in CODE_ALIASES.items()
-    }
-    if compact in compact_aliases:
-        return compact_aliases[compact]
-    if compact in FULL_CODES:
-        return compact
-
-    # Allow a known full code plus trailing notes: "15FMCA EXISTING".
-    for code in sorted(FULL_CODES, key=len, reverse=True):
-        code_c = compact_code(code)
-        if compact.startswith(code_c) and len(compact) <= len(code_c) + 8:
-            return code
-        if compact.endswith(code_c) and len(compact) <= len(code_c) + 8:
-            return code
-    return norm
-
-
-# ---------------------------------------------------------------------------
-# Angle helpers
-# ---------------------------------------------------------------------------
+# ============================================================
+# ANGLE HELPERS
+# ============================================================
 
 def normalize_angle(angle):
+    """
+    Normalize angle to 0 <= angle < 360.
+    """
+
     try:
         angle = float(angle)
-    except (TypeError, ValueError):
+    except Exception:
         return 0.0
+
     angle = angle % 360.0
+
     if angle < 0:
         angle += 360.0
+
     return angle
 
 
 def normalize_line_angle(angle):
-    """Fold a direction onto 0 <= angle < 180. 0 and 180 are the same line."""
-    angle = normalize_angle(angle) % 180.0
-    if abs(angle - 180.0) < 1e-6 or abs(angle) < 1e-6:
-        return 0.0
-    if abs(angle - 90.0) < 1e-6:
-        return 90.0
-    return angle
+    """
+    Normalize a line direction to 0 <= angle < 180.
 
+    A line at:
+        0°
+    and:
+        180°
 
-def angle_from_offset(dx, dy):
-    if abs(dx) < 1e-9 and abs(dy) < 1e-9:
-        return 0.0
-    return normalize_line_angle(math.degrees(math.atan2(dy, dx)))
+    represents the same physical direction.
 
+    Therefore:
 
-def angular_delta(a, b):
-    """Smallest difference between two undirected line angles, 0..90."""
-    d = abs(normalize_line_angle(a) - normalize_line_angle(b))
-    return min(d, 180.0 - d)
+        0°   -> 0°
+        180° -> 0°
+        270° -> 90°
+        360° -> 0°
+    """
 
+    angle = normalize_angle(angle)
 
-def snap_line_angle(angle, snap=ANGLE_SNAP_DEG):
-    angle = normalize_line_angle(angle)
-    for target in (0.0, 45.0, 90.0, 135.0):
-        if angular_delta(angle, target) <= snap:
-            return target
+    angle = angle % 180.0
+
+    if abs(angle - 180.0) < 0.000001:
+        angle = 0.0
+
+    if abs(angle) < 0.000001:
+        angle = 0.0
+
+    if abs(angle - 90.0) < 0.000001:
+        angle = 90.0
+
     return angle
 
 
 def get_orientation(rotation_angle):
     """
-    Classify a long-axis angle.
+    Convert an actual angle into a broad orientation category.
 
-    0° / 180° -> HORIZONTAL
-    90°       -> VERTICAL
-    else      -> DIAGONAL
+    HORIZONTAL:
+        approximately 0°
 
-    135° is diagonal, not vertical. The previous detector treated any
-    angle > 65° as vertical, which flipped NW-SE runs.
+    VERTICAL:
+        approximately 90°
+
+    DIAGONAL:
+        anything between the two.
     """
+
     angle = normalize_line_angle(rotation_angle)
-    if angular_delta(angle, 0.0) <= 25.0:
+
+    if angle < 25.0 or angle > 155.0:
         return "HORIZONTAL"
-    if angular_delta(angle, 90.0) <= 25.0:
+
+    elif 65.0 <= angle <= 115.0:
         return "VERTICAL"
-    return "DIAGONAL"
 
-
-def tracing_to_revit_angle(orientation_angle):
-    """
-    Convert gondola long-axis (0=+X, 90=+Y) into Revit family rotation.
-
-    The store families sit along +Y at 0°. Adding 90° and folding back
-    onto 0-180 reproduces the established convention:
-
-        HORIZONTAL -> 90°
-        VERTICAL   -> 0°
-        45° run    -> 135°
-        135° run   -> 45°
-    """
-    return normalize_line_angle(orientation_angle + 90.0)
-
-
-def pick_json_angle(item, use_json_angle=True):
-    """
-    Dynamo-equivalent angle reader.
-
-    Prefer explicit placement angles. Never treat DXF text `rotation`
-    as the family rotation — that field is almost always 0 because
-    labels stay readable.
-    """
-    if not use_json_angle:
-        return None
-
-    for key in ("revit_angle", "angle", "orientation_angle"):
-        if key not in item or item[key] is None:
-            continue
-        try:
-            value = float(item[key])
-        except (TypeError, ValueError):
-            continue
-        if key == "orientation_angle":
-            return tracing_to_revit_angle(value)
-        return normalize_angle(value)
-    return None
-
-
-# ---------------------------------------------------------------------------
-# Label identification
-# ---------------------------------------------------------------------------
-
-def is_noise_label(text):
-    """True for dimension / VM / overlay notes that are not fixtures."""
-    raw = normalize_code(text)
-    if not raw:
-        return True
-    compact = compact_code(raw)
-    if raw in IGNORE_LABELS or compact in IGNORE_LABELS:
-        return True
-    if re.fullmatch(r"\d+(\.\d+)?", raw):
-        return True
-    if re.fullmatch(r"2X\([^)]+\)", compact):
-        return True
-    if raw.startswith("FSD-") or raw.startswith("FSD "):
-        return True
-    if "MODS VM" in raw or raw.endswith(" SQM") or raw.endswith(" M²"):
-        return True
-    return False
-
-
-def classify_revit_name(name):
-    """
-    Classify a level, view, CAD, layer, or block name.
-
-    existing — existing-conditions content
-    proposed — proposed / selling-floor content
-    overlay  — existing and proposed together (do not place here)
-    neutral  — no hint
-    """
-    text = str(name or "").strip().lower()
-    if not text:
-        return "neutral"
-    if "overlay" in text:
-        return "overlay"
-    if "existing" in text and "proposed" in text:
-        return "overlay"
-    if "proposed" in text or "selling floor" in text or "selling-floor" in text:
-        return "proposed"
-    if any(hint.lower() in text for hint in EXISTING_LAYER_HINTS):
-        return "existing"
-    if "as built" in text or "as-built" in text:
-        return "existing"
-    if any(hint.lower() in text for hint in PROPOSED_LAYER_HINTS):
-        return "proposed"
-    return "neutral"
-
-
-def is_proposed_scope(name):
-    return classify_revit_name(name) in ("proposed", "overlay")
-
-
-def choose_existing_level_name(level_names, preferred=""):
-    """Pick an Existing level. Never returns a proposed or overlay name."""
-    names = [str(name) for name in level_names if name]
-    preferred_l = str(preferred or "").strip().lower()
-
-    def allowed(name):
-        return classify_revit_name(name) not in ("proposed", "overlay")
-
-    for name in names:
-        if name.strip().lower() == preferred_l and allowed(name):
-            return name
-    for name in names:
-        if classify_revit_name(name) == "existing" and "ground" in name.lower():
-            return name
-    for name in names:
-        if classify_revit_name(name) == "existing":
-            return name
-    for name in names:
-        if name.strip().lower() == preferred_l and allowed(name):
-            return name
-    return None
-
-
-def existing_view_score(view_name, view_level="", preferred_level=""):
-    """
-    Rank floor plans for Existing-only placement.
-
-    Existing Conditions views win even when their associated level is
-    not 00-GROUND (Kmart files often host that view on another 0.000 ft
-    level). Overlay / proposed view names always score 0.
-    """
-    scope = classify_revit_name(view_name)
-    if scope in ("proposed", "overlay"):
-        return 0
-    name = str(view_name or "").lower()
-    score = 0
-    if scope == "existing" and "condition" in name and "ground" in name:
-        score = 100
-    elif scope == "existing" and "condition" in name:
-        score = 90
-    elif scope == "existing" and "ground" in name:
-        score = 70
-    elif scope == "existing":
-        score = 50
-    elif preferred_level and str(view_level) == str(preferred_level):
-        score = 20
     else:
-        return 0
-    if preferred_level and str(view_level) == str(preferred_level):
-        score += 5
-    return score
+        return "DIAGONAL"
 
 
-def choose_existing_view_name(views, level_name=""):
+def get_orientation_from_offset(dx, dy):
     """
-    views: iterable of (view_name, view_level_name)
+    Determine orientation from the physical separation
+    between SIZE and TYPE labels.
 
-    Pick the Existing Conditions view first. Do not require it to sit
-    on 00-GROUND. Never returns an overlay or proposed view name.
+    This is used for SIZE + TYPE combinations.
+
+    The actual angle is calculated using atan2.
     """
-    best_name = None
-    best_score = 0
-    for view_name, view_level in views:
-        score = existing_view_score(view_name, view_level, level_name)
-        if score > best_score:
-            best_score = score
-            best_name = str(view_name)
-    return best_name
 
+    if abs(dx) < 0.000001 and abs(dy) < 0.000001:
+        return "HORIZONTAL"
 
-def choose_existing_placement(views, level_names, preferred_level="", preferred_view=""):
-    """
-    View-first placement.
-
-    Returns (view_name, level_name). The level is the associated level
-    of the Existing Conditions view so families actually appear there.
-    """
-    views = [(str(v), str(l)) for v, l in views if v]
-    if preferred_view:
-        preferred_l = str(preferred_view).strip().lower()
-        for view_name, view_level in views:
-            if view_name.strip().lower() == preferred_l:
-                if classify_revit_name(view_name) not in ("proposed", "overlay"):
-                    return view_name, view_level
-
-    view_name = choose_existing_view_name(views, preferred_level)
-    if view_name:
-        for name, level in views:
-            if name == view_name:
-                return name, level
-
-    return None, choose_existing_level_name(level_names, preferred_level)
-
-
-def layer_bucket(layer):
-    scope = classify_revit_name(layer)
-    if scope == "existing":
-        return "existing"
-    if scope in ("proposed", "overlay"):
-        return "proposed"
-    return "unknown"
-
-
-def filter_proposed_layers(raw_labels, existing_only=True):
-    """
-    Tracing is Existing-only. Proposed / overlay layers are dropped
-    when other labels remain. Untagged layers are kept.
-
-    If every label sits on a proposed-named layer, keep them. Existing
-    Conditions exports often put the real store text on a layer called
-    PROPOSED / SELLING FLOOR. Dropping that set writes an empty JSON.
-    """
-    buckets = defaultdict(list)
-    for label in raw_labels:
-        buckets[layer_bucket(label.get("layer", ""))].append(label)
-
-    if not existing_only:
-        return list(raw_labels), {
-            "dropped_proposed_layer": 0,
-            "kept_existing_layer": len(raw_labels),
-        }
-
-    if buckets["proposed"]:
-        kept = buckets["existing"] + buckets["unknown"]
-        if not kept:
-            return list(raw_labels), {
-                "dropped_proposed_layer": 0,
-                "kept_existing_layer": len(raw_labels),
-            }
-        return kept, {
-            "dropped_proposed_layer": len(buckets["proposed"]),
-            "kept_existing_layer": len(kept),
-        }
-    return list(raw_labels), {
-        "dropped_proposed_layer": 0,
-        "kept_existing_layer": len(raw_labels),
-    }
-
-
-def label_source_scope(label):
-    """Scope from the INSERT / leftover block name, then the layer."""
-    block_scope = classify_revit_name(label.get("block") or "")
-    if block_scope in ("existing", "proposed", "overlay"):
-        return block_scope
-    return classify_revit_name(label.get("layer") or "")
-
-
-def keep_existing_source_labels(labels, existing_only=True):
-    """
-    Prefer labels from existing-named INSERTs / leftover blocks.
-
-    Do not return empty just because the only XREF is named
-    Selling floor or Overlay. Those files often hold the actual
-    existing-plan codes.
-    """
-    if not existing_only or not labels:
-        return list(labels), {
-            "dropped_proposed_source": 0,
-            "kept_source": len(labels or []),
-        }
-
-    buckets = defaultdict(list)
-    for label in labels:
-        buckets[label_source_scope(label)].append(label)
-
-    existing = buckets["existing"]
-    overlay = buckets["overlay"]
-    proposed = buckets["proposed"]
-    neutral = buckets["neutral"]
-
-    if existing:
-        kept = existing + neutral
-        return kept, {
-            "dropped_proposed_source": len(proposed) + len(overlay),
-            "kept_source": len(kept),
-        }
-
-    if overlay or neutral:
-        if proposed:
-            kept = overlay + neutral
-            return kept, {
-                "dropped_proposed_source": len(proposed),
-                "kept_source": len(kept),
-            }
-        kept = overlay + neutral
-        return kept, {
-            "dropped_proposed_source": 0,
-            "kept_source": len(kept),
-        }
-
-    return list(labels), {
-        "dropped_proposed_source": 0,
-        "kept_source": len(labels),
-    }
-
-
-def has_classified_gondola(labels):
-    """True when any raw label is a SIZE, TYPE, PAIR, or FULL code."""
-    for label in labels or []:
-        if identify_text(label.get("text", "")):
-            return True
-    return False
-
-
-def should_scan_leftover(labels):
-    """Scan leftover blocks when modelspace has no gondola codes."""
-    return not has_classified_gondola(labels)
-
-
-LOCAL_COORD_MAX_MM = 120000.0
-ISLAND_BIN_MM = 150000.0
-
-
-def classified_labels(labels):
-    return [lab for lab in (labels or []) if identify_text(lab.get("text", ""))]
-
-
-def estimated_gondola_yield(labels):
-    """How many families this set would produce after SIZE+TYPE pairing."""
-    full = 0
-    size = 0
-    typ = 0
-    for lab in labels or []:
-        identified = identify_text(lab.get("text", ""))
-        if not identified:
-            continue
-        kind = identified[0]
-        if kind in ("FULL", "PAIR"):
-            full += 1
-        elif kind == "SIZE":
-            size += 1
-        elif kind == "TYPE":
-            typ += 1
-    return full + min(size, typ)
-
-
-def _label_xy(label):
-    try:
-        return float(label["x"]), float(label["y"])
-    except (TypeError, ValueError, KeyError):
-        return None
-
-
-def split_label_islands(labels, bin_mm=ISLAND_BIN_MM):
-    """Group labels that sit in the same ~150 m coordinate island."""
-    buckets = defaultdict(list)
-    for lab in labels or []:
-        point = _label_xy(lab)
-        if point is None:
-            continue
-        key = (int(math.floor(point[0] / bin_mm)), int(math.floor(point[1] / bin_mm)))
-        buckets[key].append(lab)
-    return list(buckets.values())
-
-
-def richest_label_island(labels):
-    """Keep the island that would produce the most gondolas."""
-    islands = split_label_islands(labels)
-    if not islands:
-        return list(labels or [])
-    islands.sort(
-        key=lambda island: (estimated_gondola_yield(island), len(classified_labels(island))),
-        reverse=True,
+    angle = math.degrees(
+        math.atan2(
+            abs(dy),
+            abs(dx)
+        )
     )
-    return list(islands[0])
+
+    angle = normalize_line_angle(angle)
+
+    return get_orientation(angle)
 
 
-def island_is_local(labels):
-    classified = classified_labels(labels)
-    if not classified:
-        return True
-    return min(float(lab["x"]) for lab in classified) < LOCAL_COORD_MAX_MM
-
-
-def pick_label_set(modelspace_labels, leftover_labels):
+def get_angle_from_offset(dx, dy):
     """
-    Original collector that filled the floor: leftover blocks win.
+    Calculate the physical tracing angle from SIZE -> TYPE.
 
-    If leftover has any gondola codes, use leftover only. Never merge
-    leftover local millimetres with world-space modelspace labels.
+    Examples:
+
+        dx > 0, dy = 0
+            -> 0°
+
+        dx = 0, dy > 0
+            -> 90°
+
+        dx > 0, dy > 0
+            -> diagonal
+
+    atan2 gives the correct geometric angle.
     """
-    leftover_island = richest_label_island(leftover_labels)
-    if estimated_gondola_yield(leftover_island) > 0:
-        return list(leftover_island), "leftover-always"
 
-    model_island = richest_label_island(modelspace_labels)
-    extra = compatible_leftover_labels(model_island, leftover_labels)
-    if extra and estimated_gondola_yield(model_island) > 0:
-        return list(model_island) + extra, "modelspace+compatible"
-    return list(model_island), "modelspace"
+    if abs(dx) < 0.000001 and abs(dy) < 0.000001:
+        return 0.0
+
+    angle = math.degrees(
+        math.atan2(
+            dy,
+            dx
+        )
+    )
+
+    return normalize_line_angle(angle)
 
 
-def compatible_leftover_labels(base_labels, extra_labels, pad_mm=80000.0):
-    """Keep leftover labels in the same coordinate island as modelspace."""
-    if not extra_labels:
-        return []
-    classified_base = [
-        lab for lab in (base_labels or [])
-        if identify_text(lab.get("text", ""))
-    ]
-    if not classified_base:
-        return list(extra_labels)
-    xs = [float(lab["x"]) for lab in classified_base]
-    ys = [float(lab["y"]) for lab in classified_base]
-    min_x, max_x = min(xs), max(xs)
-    min_y, max_y = min(ys), max(ys)
-    kept = []
-    for lab in extra_labels:
+# ============================================================
+# CREATE COMPLETE CODE ITEM
+# ============================================================
+
+def make_full_code_item(
+    text,
+    x,
+    y,
+    rotation,
+    layer
+):
+    """
+    Creates a gondola item for a complete code that exists
+    as one TEXT / MTEXT entity.
+
+    IMPORTANT:
+    orientation_angle is now explicitly included.
+    """
+
+    tracing_angle = normalize_line_angle(
+        rotation
+    )
+
+    return {
+        "code": text,
+
+        "top": "",
+        "bottom": "",
+
+        "x": round(x, 3),
+        "y": round(y, 3),
+
+        "rotation": round(rotation, 3),
+
+        # Actual physical DXF tracing direction
+        "orientation_angle": round(
+            tracing_angle,
+            3
+        ),
+
+        # Broad classification
+        "orientation": get_orientation(
+            tracing_angle
+        ),
+
+        "pair_dx": 0,
+        "pair_dy": 0,
+
+        "layer": layer,
+
+        "pair_dist": 0,
+
+        "detection": "FULL_CODE"
+    }
+
+
+# ============================================================
+# MAIN EXTRACTION FUNCTION
+# ============================================================
+
+def extract_with_orientation(dxf_path):
+
+    size_texts = []
+    type_texts = []
+    full_code_gondolas = []
+
+    print("Loading DXF file...")
+    print(dxf_path)
+    print("")
+
+    doc = ezdxf.readfile(
+        dxf_path
+    )
+
+    print("DXF loaded!")
+    print("")
+
+
+    # ========================================================
+    # PROCESS ENTITY
+    # ========================================================
+
+    def process_entity(entity):
+
+        text = ""
+        x = 0.0
+        y = 0.0
+        rotation = 0.0
+        layer = ""
+
+
+        # ----------------------------------------------------
+        # TEXT
+        # ----------------------------------------------------
+
+        if entity.dxftype() == "TEXT":
+
+            try:
+                text = (
+                    entity.dxf.text
+                    .strip()
+                    .upper()
+                )
+            except Exception:
+                return
+
+            try:
+                x = entity.dxf.insert.x
+                y = entity.dxf.insert.y
+            except Exception:
+                return
+
+            try:
+                rotation = entity.dxf.get(
+                    "rotation",
+                    0
+                )
+            except Exception:
+                rotation = 0
+
+            try:
+                layer = entity.dxf.layer
+            except Exception:
+                layer = ""
+
+
+        # ----------------------------------------------------
+        # MTEXT
+        # ----------------------------------------------------
+
+        elif entity.dxftype() == "MTEXT":
+
+            try:
+                text = (
+                    entity.text
+                    .strip()
+                    .upper()
+                )
+            except Exception:
+                return
+
+            try:
+                x = entity.dxf.insert.x
+                y = entity.dxf.insert.y
+            except Exception:
+                return
+
+            try:
+                rotation = entity.dxf.get(
+                    "rotation",
+                    0
+                )
+            except Exception:
+                rotation = 0
+
+            try:
+                layer = entity.dxf.layer
+            except Exception:
+                layer = ""
+
+        else:
+            return
+
+
+        if not text:
+            return
+
+
+        # ====================================================
+        # COMPLETE CODE
+        # ====================================================
+
+        if text in FULL_CODES:
+
+            full_code_gondolas.append(
+                make_full_code_item(
+                    text,
+                    x,
+                    y,
+                    rotation,
+                    layer
+                )
+            )
+
+            return
+
+
+        # ====================================================
+        # SIZE / TYPE
+        # ====================================================
+
+        item = {
+
+            "text": text,
+
+            "x": round(
+                x,
+                3
+            ),
+
+            "y": round(
+                y,
+                3
+            ),
+
+            "rotation": round(
+                rotation,
+                3
+            ),
+
+            "orientation_angle": round(
+                normalize_line_angle(
+                    rotation
+                ),
+                3
+            ),
+
+            "orientation": get_orientation(
+                rotation
+            ),
+
+            "layer": layer
+        }
+
+
+        if text in SIZE_CODES:
+
+            size_texts.append(
+                item
+            )
+
+        elif text in TYPE_CODES:
+
+            type_texts.append(
+                item
+            )
+
+
+    # ========================================================
+    # SCAN BLOCK DEFINITIONS / XREFS
+    # ========================================================
+
+    print("Scanning XREF blocks...")
+
+    for block_def in doc.blocks:
+
         try:
-            x = float(lab["x"])
-            y = float(lab["y"])
-        except (TypeError, ValueError, KeyError):
+
+            if block_def.name.startswith("*"):
+                continue
+
+        except Exception:
             continue
-        if min_x - pad_mm <= x <= max_x + pad_mm and min_y - pad_mm <= y <= max_y + pad_mm:
-            kept.append(lab)
-    return kept
 
 
-def is_layout_block(name):
-    text = str(name or "").strip().lower()
-    if not text:
-        return True
-    return (
-        text.startswith("*model_space")
-        or text.startswith("*paper_space")
-        or text in ("*model_space", "*paper_space")
+        for entity in block_def:
+
+            try:
+                process_entity(entity)
+
+            except Exception:
+                pass
+
+
+    # ========================================================
+    # SCAN MODELSPACE
+    # ========================================================
+
+    print("Scanning modelspace...")
+
+    msp = doc.modelspace()
+
+    for entity in msp:
+
+        try:
+            process_entity(entity)
+
+        except Exception:
+            pass
+
+
+    # ========================================================
+    # REPORT FOUND LABELS
+    # ========================================================
+
+    print("")
+    print(
+        "Size labels found: {}".format(
+            len(size_texts)
+        )
+    )
+
+    print(
+        "Type labels found: {}".format(
+            len(type_texts)
+        )
+    )
+
+    print(
+        "Complete codes found: {}".format(
+            len(full_code_gondolas)
+        )
+    )
+
+    print("")
+
+
+    # ========================================================
+    # MATCH SIZE + TYPE
+    # ========================================================
+
+    used_indices = set()
+
+    gondolas = []
+
+
+    for size_item in size_texts:
+
+        sx = size_item["x"]
+        sy = size_item["y"]
+
+        best = None
+        best_dist = MATCH_DIST
+
+
+        for i, type_item in enumerate(
+            type_texts
+        ):
+
+            if i in used_indices:
+                continue
+
+
+            tx = type_item["x"]
+            ty = type_item["y"]
+
+
+            dx = tx - sx
+            dy = ty - sy
+
+
+            dist = math.sqrt(
+                dx * dx +
+                dy * dy
+            )
+
+
+            if dist < best_dist:
+
+                best_dist = dist
+
+                best = (
+                    i,
+                    type_item
+                )
+
+
+        # ----------------------------------------------------
+        # MATCH FOUND
+        # ----------------------------------------------------
+
+        if best:
+
+            idx, type_item = best
+
+            used_indices.add(
+                idx
+            )
+
+
+            tx = type_item["x"]
+            ty = type_item["y"]
+
+
+            dx = tx - sx
+            dy = ty - sy
+
+
+            # ------------------------------------------------
+            # ACTUAL ANGLE
+            # ------------------------------------------------
+            #
+            # Use the actual geometric relationship between
+            # SIZE and TYPE labels.
+            #
+            # This is particularly important for diagonals.
+            #
+
+            pair_angle = get_angle_from_offset(
+                dx,
+                dy
+            )
+
+
+            orientation = get_orientation(
+                pair_angle
+            )
+
+
+            # ------------------------------------------------
+            # GONDOLA ITEM
+            # ------------------------------------------------
+
+            gondola = {
+
+                "code":
+                    size_item["text"] +
+                    type_item["text"],
+
+                "top":
+                    size_item["text"],
+
+                "bottom":
+                    type_item["text"],
+
+                "x":
+                    sx,
+
+                "y":
+                    sy,
+
+                # Keep SIZE label rotation
+                "rotation":
+                    size_item["rotation"],
+
+                # IMPORTANT:
+                # Physical tracing angle derived from
+                # the SIZE -> TYPE geometry.
+                "orientation_angle":
+                    round(
+                        pair_angle,
+                        3
+                    ),
+
+                # Human-readable classification
+                "orientation":
+                    orientation,
+
+                "pair_dx":
+                    round(
+                        dx,
+                        1
+                    ),
+
+                "pair_dy":
+                    round(
+                        dy,
+                        1
+                    ),
+
+                "layer":
+                    size_item["layer"],
+
+                "pair_dist":
+                    round(
+                        best_dist,
+                        1
+                    ),
+
+                "detection":
+                    "SIZE_TYPE"
+            }
+
+
+            gondolas.append(
+                gondola
+            )
+
+
+    # ========================================================
+    # ADD COMPLETE CODES
+    # ========================================================
+
+    gondolas.extend(
+        full_code_gondolas
     )
 
 
-def load_gondola_items(data):
-    """Accept {gondolas: [...]} or a bare list from older detector runs."""
-    if isinstance(data, list):
-        return data
-    if not isinstance(data, dict):
-        return []
-    for key in ("gondolas", "items", "data"):
-        value = data.get(key)
-        if isinstance(value, list):
-            return value
-    return []
+    return gondolas
 
 
-def merge_nearby_phrases(raw_labels, dist=550.0):
-    """Join split notes such as STRAIGHT + RAIL or FLATDECK + W/-SURROUND."""
-    used = set()
-    merged = []
-    for i, first in enumerate(raw_labels):
-        if i in used:
-            continue
-        first_text = normalize_code(first.get("text", ""))
-        joined = False
-        for j, second in enumerate(raw_labels):
-            if j <= i or j in used:
-                continue
-            if hypot(first["x"] - second["x"], first["y"] - second["y"]) > dist:
-                continue
-            second_text = normalize_code(second.get("text", ""))
-            for (left, right), canon in PHRASE_JOINS:
-                pair = {first_text, second_text}
-                if pair == {left, right}:
-                    record = dict(first)
-                    record["text"] = canon
-                    record["x"] = (first["x"] + second["x"]) / 2.0
-                    record["y"] = (first["y"] + second["y"]) / 2.0
-                    merged.append(record)
-                    used.add(i)
-                    used.add(j)
-                    joined = True
-                    break
-            if joined:
-                break
-        if not joined:
-            merged.append(first)
-    return merged
+# ============================================================
+# RUN
+# ============================================================
+
+print("")
+print("=" * 60)
+print("  GONDOLA ORIENTATION DETECTOR")
+print("  {}".format(SCRIPT_VERSION))
+print("=" * 60)
+print("")
+
+gondolas = extract_with_orientation(
+    DXF_FILE_PATH
+)
+
+# Original File1 coverage is kept. Only orientation is rewritten:
+# SIZE→TYPE is the label stack, not the bay axis. Neighbour bays
+# (1200 / 1500 / 1800 mm) vote for the long axis. Dynamo must read
+# revit_angle / angle, never DXF text rotation (almost always 0).
+BAY_SPACINGS_MM = (1200.0, 1500.0, 1800.0, 2100.0, 900.0, 2400.0, 600.0)
+BAY_SPACING_TOLERANCE_MM = 280.0
+NEIGHBOR_SEARCH_MM = 2800.0
+INHERIT_ORIENT_DIST_MM = 3200.0
+ANGLE_SNAP_DEG = 12.0
 
 
-def identify_text(text):
-    """
-    Return a classification tuple:
-
-        ("FULL", code)
-        ("SIZE", size)
-        ("TYPE", type)
-        ("PAIR", size, type)
-        None
-    """
-    raw = normalize_code(text)
-    if not raw or is_noise_label(raw):
-        return None
-
-    canon = canonical_code(raw)
-    if canon in FULL_CODES:
-        return ("FULL", canon)
-
-    if raw in SIZE_CODES:
-        return ("SIZE", raw)
-    if raw in TYPE_CODES:
-        return ("TYPE", raw)
-
-    compact = compact_code(raw)
-    if compact in SIZE_CODES:
-        return ("SIZE", compact)
-    if compact in TYPE_CODES:
-        return ("TYPE", compact)
-
-    # "15F MCA" / "15F-MCA" / "15FMCA" that is not already a full code.
-    tokens = raw.replace("-", " ").split()
-    if len(tokens) == 2 and tokens[0] in SIZE_CODES and tokens[1] in TYPE_CODES:
-        joined = tokens[0] + tokens[1]
-        if joined in FULL_CODES or True:
-            return ("PAIR", tokens[0], tokens[1])
-
-    for size in sorted(SIZE_CODES, key=len, reverse=True):
-        if compact.startswith(size):
-            rest = compact[len(size):]
-            if rest in TYPE_CODES:
-                joined = size + rest
-                if joined in FULL_CODES:
-                    return ("FULL", joined)
-                return ("PAIR", size, rest)
-    return None
-
-
-def expand_raw_labels(raw_labels):
-    """
-    Turn DXF-like records into classified labels.
-
-    A multiline MTEXT such as "15F\\PMCA" becomes either one FULL code
-    or a SIZE + TYPE pair sharing the insert point.
-    """
-    expanded = []
-    for raw in raw_labels:
-        text = strip_mtext_codes(raw.get("text", ""))
-        lines = [normalize_code(part) for part in text.splitlines()]
-        lines = [part for part in lines if part]
-        rotation = float(raw.get("rotation", 0) or 0)
-        record = {
-            "x": float(raw.get("x", 0) or 0),
-            "y": float(raw.get("y", 0) or 0),
-            "rotation": rotation,
-            "layer": raw.get("layer", "") or "",
-        }
-
-        if len(lines) >= 2:
-            joined = "".join(lines)
-            identified = identify_text(joined) or identify_text(" ".join(lines))
-            if identified and identified[0] == "FULL":
-                item = dict(record)
-                item["text"] = identified[1]
-                item["kind"] = "FULL"
-                expanded.append(item)
-                continue
-            first = identify_text(lines[0])
-            second = identify_text(lines[1])
-            if first and second:
-                kinds = {first[0], second[0]}
-                if kinds == {"SIZE", "TYPE"}:
-                    for ident, line in ((first, lines[0]), (second, lines[1])):
-                        item = dict(record)
-                        item["text"] = ident[1]
-                        item["kind"] = ident[0]
-                        expanded.append(item)
-                    continue
-            # Fall through and classify the whole block as one label.
-
-        identified = identify_text(text) if text else None
-        if identified is None and lines:
-            identified = identify_text(" ".join(lines))
-        if identified is None:
-            continue
-
-        if identified[0] == "PAIR":
-            _, size, typ = identified
-            for kind, value in (("SIZE", size), ("TYPE", typ)):
-                item = dict(record)
-                item["text"] = value
-                item["kind"] = kind
-                expanded.append(item)
-            continue
-
-        item = dict(record)
-        item["text"] = identified[1]
-        item["kind"] = identified[0]
-        expanded.append(item)
-    return expanded
-
-
-def dedup_labels(labels, dist=DEDUP_DIST_MM):
-    """Drop duplicate TEXT/MTEXT that come from block + modelspace scans."""
-    kept = []
-    for label in labels:
-        duplicate = False
-        for other in kept:
-            if label["kind"] != other["kind"] or label["text"] != other["text"]:
-                continue
-            if hypot(label["x"] - other["x"], label["y"] - other["y"]) <= dist:
-                duplicate = True
-                break
-        if not duplicate:
-            kept.append(label)
-    return kept
-
-
-def hypot(dx, dy):
+def _hypot(dx, dy):
     return math.sqrt(dx * dx + dy * dy)
 
 
-# ---------------------------------------------------------------------------
-# SIZE + TYPE matching
-# ---------------------------------------------------------------------------
-
-def _nearest(item, candidates, max_dist, used):
-    best_i = None
-    best_dist = max_dist
-    for i, other in enumerate(candidates):
-        if i in used:
-            continue
-        dist = hypot(other["x"] - item["x"], other["y"] - item["y"])
-        if dist < best_dist:
-            best_dist = dist
-            best_i = i
-    if best_i is None:
-        return None, None
-    return best_i, best_dist
+def _angular_delta(a, b):
+    delta = abs(normalize_line_angle(a) - normalize_line_angle(b))
+    if delta > 90.0:
+        delta = 180.0 - delta
+    return delta
 
 
-def match_size_type(labels):
-    sizes = [lab for lab in labels if lab["kind"] == "SIZE"]
-    types = [lab for lab in labels if lab["kind"] == "TYPE"]
-    used_sizes = set()
-    used_types = set()
-    pairs = []
+def _snap_line_angle(angle, snap=ANGLE_SNAP_DEG):
+    angle = normalize_line_angle(angle)
+    for target in (0.0, 45.0, 90.0, 135.0):
+        if _angular_delta(angle, target) <= snap:
+            return target
+    return angle
 
-    def collect(max_dist, require_mutual=True):
-        for si, size in enumerate(sizes):
-            if si in used_sizes:
-                continue
-            ti, dist = _nearest(size, types, max_dist, used_types)
-            if ti is None:
-                continue
-            if require_mutual:
-                back, _ = _nearest(types[ti], sizes, max_dist, used_sizes)
-                if back != si:
-                    continue
-            used_sizes.add(si)
-            used_types.add(ti)
-            pairs.append((size, types[ti], dist))
-
-    collect(TIGHT_PAIR_DIST_MM, require_mutual=True)
-    collect(LOOSE_PAIR_DIST_MM, require_mutual=True)
-    collect(LOOSE_PAIR_DIST_MM, require_mutual=False)
-    return pairs, used_sizes, used_types, sizes, types
-
-
-def make_pair_gondola(size, typ, dist):
-    dx = typ["x"] - size["x"]
-    dy = typ["y"] - size["y"]
-    # Label stack is usually perpendicular to the bay. Use that as a
-    # fallback axis only after neighbour voting has had a chance.
-    stack_angle = angle_from_offset(dx, dy)
-    fallback_axis = normalize_line_angle(stack_angle + 90.0)
-    text_rot = snap_line_angle(size.get("rotation", 0) or 0)
-    x = (size["x"] + typ["x"]) / 2.0
-    y = (size["y"] + typ["y"]) / 2.0
-    code = size["text"] + typ["text"]
-    if code not in FULL_CODES:
-        joined = canonical_code(code)
-        if joined in FULL_CODES:
-            code = joined
-    return {
-        "code": code,
-        "top": size["text"],
-        "bottom": typ["text"],
-        "x": round(x, 3),
-        "y": round(y, 3),
-        "rotation": round(float(size.get("rotation", 0) or 0), 3),
-        "text_rotation": round(float(size.get("rotation", 0) or 0), 3),
-        "orientation_angle": round(fallback_axis, 3),
-        "revit_angle": round(tracing_to_revit_angle(fallback_axis), 3),
-        "angle": round(tracing_to_revit_angle(fallback_axis), 3),
-        "orientation": get_orientation(fallback_axis),
-        "orientation_source": "PAIR_STACK_PERPENDICULAR",
-        "pair_dx": round(dx, 1),
-        "pair_dy": round(dy, 1),
-        "pair_dist": round(dist, 1),
-        "layer": size.get("layer", ""),
-        "detection": "SIZE_TYPE",
-        "text_rotation_snapped": text_rot,
-        "_fallback_axis": fallback_axis,
-    }
-
-
-def make_full_gondola(label):
-    text_rot = normalize_line_angle(label.get("rotation", 0) or 0)
-    # Upright text (0°) is not a reliable axis. Keep it only as a hint.
-    axis = snap_line_angle(text_rot) if angular_delta(text_rot, 0.0) > 8.0 else 0.0
-    source = "TEXT_ROTATION" if angular_delta(text_rot, 0.0) > 8.0 else "DEFAULT_HORIZONTAL"
-    return {
-        "code": label["text"],
-        "top": "",
-        "bottom": "",
-        "x": round(label["x"], 3),
-        "y": round(label["y"], 3),
-        "rotation": round(float(label.get("rotation", 0) or 0), 3),
-        "text_rotation": round(float(label.get("rotation", 0) or 0), 3),
-        "orientation_angle": round(axis, 3),
-        "revit_angle": round(tracing_to_revit_angle(axis), 3),
-        "angle": round(tracing_to_revit_angle(axis), 3),
-        "orientation": get_orientation(axis),
-        "orientation_source": source,
-        "pair_dx": 0,
-        "pair_dy": 0,
-        "pair_dist": 0,
-        "layer": label.get("layer", ""),
-        "detection": "FULL_CODE",
-        "text_rotation_snapped": snap_line_angle(text_rot),
-        "_fallback_axis": axis,
-    }
-
-
-# ---------------------------------------------------------------------------
-# Neighbour-run orientation
-# ---------------------------------------------------------------------------
 
 def _is_bay_spacing(dist):
     if dist < 400.0 or dist > NEIGHBOR_SEARCH_MM:
@@ -1091,49 +1191,7 @@ def _is_bay_spacing(dist):
     return False
 
 
-def infer_run_angle(index, gondolas):
-    """Vote on long-axis direction from neighbouring bay centres."""
-    target = gondolas[index]
-    votes = []
-    for j, other in enumerate(gondolas):
-        if j == index:
-            continue
-        dx = other["x"] - target["x"]
-        dy = other["y"] - target["y"]
-        dist = hypot(dx, dy)
-        if not _is_bay_spacing(dist):
-            continue
-        weight = 2.0 if other["code"][:3] == target["code"][:3] else 1.0
-        if other["code"] == target["code"]:
-            weight += 1.5
-        votes.append((weight, angle_from_offset(dx, dy), dist))
-
-    if not votes:
-        return None, None
-
-    # Cluster votes that agree within 15°.
-    buckets = []
-    for weight, ang, dist in votes:
-        placed = False
-        for bucket in buckets:
-            if angular_delta(bucket["angle"], ang) <= 15.0:
-                bucket["weight"] += weight
-                bucket["angles"].append(ang)
-                placed = True
-                break
-        if not placed:
-            buckets.append({"angle": ang, "weight": weight, "angles": [ang]})
-
-    buckets.sort(key=lambda b: b["weight"], reverse=True)
-    best = buckets[0]
-    if best["weight"] < 1.0:
-        return None, None
-    mean = mean_line_angle(best["angles"])
-    return snap_line_angle(mean), "NEIGHBOR_RUN"
-
-
-def mean_line_angle(angles):
-    """Circular mean of undirected line angles."""
+def _mean_line_angle(angles):
     if not angles:
         return 0.0
     x = sum(math.cos(math.radians(2.0 * ang)) for ang in angles)
@@ -1141,509 +1199,396 @@ def mean_line_angle(angles):
     return normalize_line_angle(math.degrees(math.atan2(y, x)) / 2.0)
 
 
-def apply_orientations(gondolas):
-    """
-    Fill orientation from neighbour runs, then inherit, then fallbacks.
-    """
-    resolved = [None] * len(gondolas)
+def _tracing_to_revit_angle(orientation_angle):
+    return normalize_line_angle(normalize_line_angle(orientation_angle) + 90.0)
 
-    for i in range(len(gondolas)):
-        angle, source = infer_run_angle(i, gondolas)
-        if angle is not None:
-            resolved[i] = (angle, source)
 
-    # Isolated gondolas inherit from a nearby already-resolved neighbour.
-    for i, gondola in enumerate(gondolas):
+def apply_neighbor_orientations(items):
+    resolved = [None] * len(items)
+    for i, target in enumerate(items):
+        votes = []
+        for j, other in enumerate(items):
+            if i == j:
+                continue
+            dx = other["x"] - target["x"]
+            dy = other["y"] - target["y"]
+            dist = _hypot(dx, dy)
+            if not _is_bay_spacing(dist):
+                continue
+            weight = 2.0 if other["code"][:3] == target["code"][:3] else 1.0
+            if other["code"] == target["code"]:
+                weight += 1.5
+            votes.append((weight, get_angle_from_offset(dx, dy)))
+        if not votes:
+            continue
+        buckets = []
+        for weight, ang in votes:
+            placed = False
+            for bucket in buckets:
+                if _angular_delta(bucket["angle"], ang) <= 15.0:
+                    bucket["weight"] += weight
+                    bucket["angles"].append(ang)
+                    placed = True
+                    break
+            if not placed:
+                buckets.append({"angle": ang, "weight": weight, "angles": [ang]})
+        buckets.sort(key=lambda b: b["weight"], reverse=True)
+        if buckets and buckets[0]["weight"] >= 1.0:
+            resolved[i] = (_snap_line_angle(_mean_line_angle(buckets[0]["angles"])), "NEIGHBOR_RUN")
+
+    for i, item in enumerate(items):
         if resolved[i] is not None:
             continue
         best = None
         best_dist = INHERIT_ORIENT_DIST_MM
-        for j, other in enumerate(gondolas):
+        for j, other in enumerate(items):
             if resolved[j] is None:
                 continue
-            dist = hypot(other["x"] - gondola["x"], other["y"] - gondola["y"])
+            dist = _hypot(other["x"] - item["x"], other["y"] - item["y"])
             if dist < best_dist:
                 best_dist = dist
                 best = resolved[j]
         if best is not None:
             resolved[i] = (best[0], "INHERITED_NEIGHBOR")
 
-    for i, gondola in enumerate(gondolas):
+    for i, item in enumerate(items):
         if resolved[i] is None:
-            text_rot = gondola.get("text_rotation_snapped", 0.0)
-            if angular_delta(text_rot, 0.0) > 8.0:
-                resolved[i] = (text_rot, "TEXT_ROTATION")
-            else:
-                resolved[i] = (
-                    snap_line_angle(gondola.get("_fallback_axis", 0.0)),
-                    gondola.get("orientation_source", "DEFAULT_HORIZONTAL"),
-                )
-
+            # SIZE→TYPE is across the bay. Turn it into the long axis.
+            fallback = normalize_line_angle(item.get("orientation_angle", 0.0) + 90.0)
+            if item.get("detection") == "FULL_CODE":
+                fallback = 0.0
+            resolved[i] = (_snap_line_angle(fallback), "PAIR_STACK_PERPENDICULAR")
         angle, source = resolved[i]
-        angle = snap_line_angle(angle)
-        gondola["orientation_angle"] = round(angle, 3)
-        gondola["revit_angle"] = round(tracing_to_revit_angle(angle), 3)
-        gondola["angle"] = gondola["revit_angle"]
-        gondola["orientation"] = get_orientation(angle)
-        gondola["orientation_source"] = source
-        gondola.pop("_fallback_axis", None)
-        gondola.pop("text_rotation_snapped", None)
-
-    return gondolas
+        item["orientation_angle"] = round(angle, 3)
+        item["revit_angle"] = round(_tracing_to_revit_angle(angle), 3)
+        item["angle"] = item["revit_angle"]
+        item["orientation"] = get_orientation(angle)
+        item["orientation_source"] = source
+    return items
 
 
-def _same_fixture(left, right):
-    return compact_code(left.get("code", "")) == compact_code(right.get("code", ""))
+gondolas = apply_neighbor_orientations(gondolas)
+print("Orientation rewrite : neighbour-run (original collect kept)")
+print("")
 
 
-def detection_rank(gondola):
-    # Existing drawings use stacked SIZE+TYPE. Proposed drawings use
-    # a single complete code. Prefer the pair when both sit on one bay.
-    return 0 if gondola.get("detection") == "SIZE_TYPE" else 1
+# ============================================================
+# REPORT
+# ============================================================
+
+print("")
+print("=" * 60)
+print("  GONDOLA ORIENTATION REPORT")
+print("=" * 60)
+print("")
 
 
-def dedup_overlapping_gondolas(gondolas, dist=OVERLAP_DEDUP_MM):
-    """
-    Drop a second family when existing and proposed labels name the
-    same fixture in the same bay. Keep end panels next to gondolas.
-    """
-    ordered = sorted(
-        gondolas,
-        key=lambda item: (detection_rank(item), item.get("x", 0), item.get("y", 0)),
+horizontal = [
+    g
+    for g in gondolas
+    if g["orientation"] == "HORIZONTAL"
+]
+
+
+vertical = [
+    g
+    for g in gondolas
+    if g["orientation"] == "VERTICAL"
+]
+
+
+diagonal = [
+    g
+    for g in gondolas
+    if g["orientation"] == "DIAGONAL"
+]
+
+
+total = len(
+    gondolas
+)
+
+
+# ============================================================
+# SUMMARY
+# ============================================================
+
+print(
+    "Total gondolas : {}".format(
+        total
     )
-    kept = []
-    dropped = 0
-    for item in ordered:
-        clash = False
-        for other in kept:
-            if hypot(item["x"] - other["x"], item["y"] - other["y"]) > dist:
-                continue
-            if _same_fixture(item, other):
-                clash = True
-                break
-        if clash:
-            dropped += 1
-            continue
-        kept.append(item)
-    return kept, dropped
+)
+
+print(
+    "Horizontal     : {} ({:.1f}%)".format(
+        len(horizontal),
+        len(horizontal) / total * 100
+        if total else 0
+    )
+)
+
+print(
+    "Vertical       : {} ({:.1f}%)".format(
+        len(vertical),
+        len(vertical) / total * 100
+        if total else 0
+    )
+)
+
+print(
+    "Diagonal       : {} ({:.1f}%)".format(
+        len(diagonal),
+        len(diagonal) / total * 100
+        if total else 0
+    )
+)
+
+print("")
 
 
-def build_gondolas(raw_labels):
-    """
-    Full detector pipeline from raw DXF-like labels.
+# ============================================================
+# ORIENTATION LIST
+# ============================================================
 
-    Returns (gondolas, diagnostics).
-    """
-    filtered, layer_info = filter_proposed_layers(raw_labels)
-    merged = merge_nearby_phrases(filtered)
-    expanded = expand_raw_labels(merged)
-    expanded = dedup_labels(expanded)
+for label, group, arrow in [
 
-    pairs, used_sizes, used_types, sizes, types = match_size_type(expanded)
-    gondolas = [make_pair_gondola(size, typ, dist) for size, typ, dist in pairs]
+    (
+        "HORIZONTAL",
+        horizontal,
+        "→"
+    ),
 
-    for label in expanded:
-        if label["kind"] == "FULL":
-            gondolas.append(make_full_gondola(label))
+    (
+        "VERTICAL",
+        vertical,
+        "↑"
+    ),
 
-    gondolas, dropped_overlaps = dedup_overlapping_gondolas(gondolas)
-    gondolas = apply_orientations(gondolas)
+    (
+        "DIAGONAL",
+        diagonal,
+        "↗"
+    ),
 
-    unmatched_sizes = [
-        sizes[i] for i in range(len(sizes)) if i not in used_sizes
-    ]
-    unmatched_types = [
-        types[i] for i in range(len(types)) if i not in used_types
-    ]
+]:
 
-    diagnostics = {
-        "raw_labels": len(raw_labels),
-        "classified_labels": len(expanded),
-        "size_labels": len(sizes),
-        "type_labels": len(types),
-        "full_codes": sum(1 for lab in expanded if lab["kind"] == "FULL"),
-        "pairs": len(pairs),
-        "unmatched_sizes": unmatched_sizes,
-        "unmatched_types": unmatched_types,
-        "dropped_proposed_layer": layer_info["dropped_proposed_layer"],
-        "dropped_overlaps": dropped_overlaps,
-        "ignored_notes": sum(
-            1 for label in raw_labels if is_noise_label(label.get("text", ""))
-        ),
-        "total": len(gondolas),
-    }
-    return gondolas, diagnostics
+    print(
+        "─" * 60
+    )
+
+    print(
+        "{} GONDOLAS ({}):".format(
+            label,
+            arrow
+        )
+    )
+
+    print(
+        "─" * 60
+    )
 
 
-def summarise(gondolas):
-    groups = defaultdict(list)
-    for gondola in gondolas:
-        groups[gondola["orientation"]].append(gondola)
-    return {
-        "total": len(gondolas),
-        "horizontal": len(groups["HORIZONTAL"]),
-        "vertical": len(groups["VERTICAL"]),
-        "diagonal": len(groups["DIAGONAL"]),
-        "groups": groups,
-    }
+    for g in group:
 
-
-# ---------------------------------------------------------------------------
-# Detector settings
-# ---------------------------------------------------------------------------
-
-DXF_FILE_PATH = r"C:\Users\msharan\OneDrive - Kmart Australia Limited\Desktop\Stores Foundry\PPT , Requirements, Demo videos, Pics\1131 Marrickville-Existing plan trace exercise_2 - Floor Plan - 1-0 EXISTING CONDITIONS - GROUND.dxf"
-
-OUTPUT_JSON = r"C:\Users\msharan\OneDrive - Kmart Australia Limited\Desktop\Stores Foundry\Tracing\json\gondola_data_Marrickville_New4.json"
-
-# Prefer Existing-named sources. Never write an empty JSON just because
-# the only XREF or leftover block is named Selling floor / Overlay.
-EXISTING_ONLY = True
-SCRIPT_VERSION = "2026-10-05k-original-collect"
-
-
-def _entity_point(entity):
-    try:
-        insert = entity.dxf.insert
-        return float(insert.x), float(insert.y)
-    except Exception:
-        return None
-
-
-def _entity_rotation(entity):
-    try:
-        return float(entity.dxf.get("rotation", 0) or 0)
-    except Exception:
-        return 0.0
-
-
-def _entity_layer(entity):
-    try:
-        return entity.dxf.layer or ""
-    except Exception:
-        return ""
-
-
-def _entity_text(entity):
-    dxftype = entity.dxftype()
-    try:
-        if dxftype == "MTEXT":
-            return entity.text
-        return entity.dxf.text
-    except Exception:
-        return ""
-
-
-def _as_label(entity, block_name=""):
-    point = _entity_point(entity)
-    if point is None:
-        return None
-    text = _entity_text(entity)
-    if not text:
-        return None
-    return {
-        "text": text,
-        "x": point[0],
-        "y": point[1],
-        "rotation": _entity_rotation(entity),
-        "layer": _entity_layer(entity),
-        "block": block_name or "",
-    }
-
-
-def _child_scope_name(child_name, parent_name=""):
-    child_name = child_name or ""
-    if child_name and not child_name.startswith("*"):
-        return child_name
-    return parent_name or child_name
-
-
-def _walk_insert(entity, collector, depth=0, block_name=""):
-    if depth > 8:
-        return
-    try:
-        virtuals = list(entity.virtual_entities())
-    except Exception:
-        virtuals = []
-        try:
-            block = entity.doc.blocks.get(entity.dxf.name)
-        except Exception:
-            block = None
-        if block is None:
-            return
-        for child in block:
-            _collect_entity(child, collector, depth + 1, block_name)
-        return
-
-    for child in virtuals:
-        _collect_entity(child, collector, depth + 1, block_name)
-
-
-def _collect_entity(entity, collector, depth=0, block_name=""):
-    try:
-        dxftype = entity.dxftype()
-    except Exception:
-        return
-
-    if dxftype in ("TEXT", "MTEXT", "ATTRIB", "ATTDEF"):
-        label = _as_label(entity, block_name)
-        if label is not None:
-            collector.append(label)
-        return
-
-    if dxftype == "INSERT":
-        try:
-            child_name = entity.dxf.name
-        except Exception:
-            child_name = ""
-        scope_name = _child_scope_name(child_name, block_name)
-        _walk_insert(entity, collector, depth, scope_name)
-
-
-def _scan_leftover_blocks(doc):
-    """
-    Original leftover scan from the run that filled most bays.
-
-    Every named block, local block coordinates, no proposed-name skip.
-    Star blocks (*Model_Space, *U…) are skipped the same way as File1.
-    Labels do not carry a block name, so a Selling-floor leftover is
-    not dropped by the Existing-only source filter.
-    """
-    extra = []
-    seen = set()
-    for block_def in doc.blocks:
-        try:
-            name = block_def.name
-        except Exception:
-            continue
-        if str(name).startswith("*"):
-            continue
-        for entity in block_def:
-            try:
-                if entity.dxftype() not in ("TEXT", "MTEXT", "ATTRIB", "ATTDEF"):
-                    continue
-                label = _as_label(entity)
-                if label is None:
-                    continue
-                key = (round(label["x"], 1), round(label["y"], 1), label["text"])
-                if key in seen:
-                    continue
-                extra.append(label)
-                seen.add(key)
-            except Exception:
-                pass
-    return extra
-
-
-def collect_dxf_labels(dxf_path):
-    print("Loading DXF file...")
-    print(dxf_path)
-    print("")
-
-    doc = ezdxf.readfile(dxf_path)
-    print("DXF loaded!")
-    if EXISTING_ONLY and is_proposed_scope(dxf_path):
-        print("WARNING: DXF path looks like a Proposed / selling-floor file.")
-        print("Tracing must use the Existing Conditions drawing only.")
-        print("")
-    print("")
-
-    labels = []
-
-    print("Scanning modelspace (including INSERTs / XREFs)...")
-    for entity in doc.modelspace():
-        try:
-            _collect_entity(entity, labels)
-        except Exception:
-            pass
-    print("Modelspace labels : {}".format(len(labels)))
-
-    print("Scanning leftover block definitions (original File1 path)...")
-    extra = _scan_leftover_blocks(doc)
-    print("Leftover labels         : {}".format(len(extra)))
-
-    labels, island_source = pick_label_set(labels, extra)
-    leftover_used = estimated_gondola_yield(extra)
-    print("Label island            : {}".format(island_source))
-    classified = classified_labels(labels)
-    if classified:
-        xs = [float(lab["x"]) for lab in classified]
-        ys = [float(lab["y"]) for lab in classified]
         print(
-            "Island classified       : {}  yield={}  x={:.0f}..{:.0f}  y={:.0f}..{:.0f}".format(
-                len(classified),
-                estimated_gondola_yield(labels),
-                min(xs),
-                max(xs),
-                min(ys),
-                max(ys),
+            "  {:<30} "
+            "x={:>8.0f} "
+            "y={:>8.0f} "
+            "angle={:>7.2f}° "
+            "dist={:>7.1f}mm "
+            "[{}]".format(
+
+                g["code"],
+
+                g["x"],
+
+                g["y"],
+
+                g.get(
+                    "orientation_angle",
+                    0
+                ),
+
+                g["pair_dist"],
+
+                g["detection"]
             )
         )
-        if island_is_local(labels):
-            print("Island coordinates      : LOCAL (Dynamo will add the CAD offset)")
-        else:
-            print("Island coordinates      : WORLD (Dynamo will skip the CAD offset)")
 
-    before_filter = estimated_gondola_yield(labels)
-    filtered, source_info = keep_existing_source_labels(labels, EXISTING_ONLY)
-    if estimated_gondola_yield(filtered) >= max(1, int(before_filter * 0.8)):
-        labels = filtered
-    else:
-        print("Keeping leftover-always set; Existing source filter would drop too many labels.")
-        source_info = {
-            "dropped_proposed_source": 0,
-            "kept_source": len(labels),
-        }
-    print("Labels after source filter: {}".format(len(labels)))
-    print("Dropped proposed-named source: {}".format(source_info["dropped_proposed_source"]))
-    print("Leftover yield          : {}".format(leftover_used))
-    print("Labels collected        : {}".format(len(labels)))
-    print("")
-    return labels
-
-
-def extract_with_orientation(dxf_path):
-    labels = collect_dxf_labels(dxf_path)
-    gondolas, diagnostics = build_gondolas(labels)
-
-    print("Classified labels : {}".format(diagnostics["classified_labels"]))
-    print("Size labels found : {}".format(diagnostics["size_labels"]))
-    print("Type labels found : {}".format(diagnostics["type_labels"]))
-    print("Complete codes    : {}".format(diagnostics["full_codes"]))
-    print("SIZE+TYPE pairs   : {}".format(diagnostics["pairs"]))
-    print("Unmatched sizes   : {}".format(len(diagnostics["unmatched_sizes"])))
-    print("Unmatched types   : {}".format(len(diagnostics["unmatched_types"])))
-    print("Ignored notes     : {}".format(diagnostics.get("ignored_notes", 0)))
-    print("Dropped proposed  : {}".format(diagnostics.get("dropped_proposed_layer", 0)))
-    print("Dropped overlaps  : {}".format(diagnostics.get("dropped_overlaps", 0)))
-    print("")
-    return gondolas, diagnostics
-
-
-def print_report(gondolas, diagnostics):
-    stats = summarise(gondolas)
-    total = stats["total"]
 
     print("")
-    print("=" * 60)
-    print("  GONDOLA ORIENTATION REPORT")
-    print("=" * 60)
-    print("")
-    print("Total gondolas : {}".format(total))
-    print("Horizontal     : {} ({:.1f}%)".format(
-        stats["horizontal"],
-        stats["horizontal"] / total * 100 if total else 0,
-    ))
-    print("Vertical       : {} ({:.1f}%)".format(
-        stats["vertical"],
-        stats["vertical"] / total * 100 if total else 0,
-    ))
-    print("Diagonal       : {} ({:.1f}%)".format(
-        stats["diagonal"],
-        stats["diagonal"] / total * 100 if total else 0,
-    ))
-    print("")
-
-    for label, key, arrow in (
-        ("HORIZONTAL", "HORIZONTAL", "→"),
-        ("VERTICAL", "VERTICAL", "↑"),
-        ("DIAGONAL", "DIAGONAL", "↗"),
-    ):
-        group = stats["groups"][key]
-        print("─" * 60)
-        print("{} GONDOLAS ({}):".format(label, arrow))
-        print("─" * 60)
-        for gondola in group:
-            print(
-                "  {:<30} "
-                "x={:>8.0f} "
-                "y={:>8.0f} "
-                "axis={:>7.2f}° "
-                "revit={:>7.2f}° "
-                "dist={:>7.1f}mm "
-                "[{} / {}]".format(
-                    gondola["code"],
-                    gondola["x"],
-                    gondola["y"],
-                    gondola.get("orientation_angle", 0),
-                    gondola.get("revit_angle", 0),
-                    gondola["pair_dist"],
-                    gondola["detection"],
-                    gondola.get("orientation_source", ""),
-                )
-            )
-        print("")
-
-    breakdown = defaultdict(lambda: {"H": 0, "V": 0, "D": 0, "total": 0})
-    for gondola in gondolas:
-        name = gondola["code"]
-        ori = gondola["orientation"][0]
-        breakdown[name][ori] += 1
-        breakdown[name]["total"] += 1
-
-    print("─" * 60)
-    print("COUNT BY CODE:")
-    print("─" * 60)
-    print("{:<30} {:>6} {:>6} {:>6} {:>6}".format("Code", "Total", "H", "V", "D"))
-    print("─" * 58)
-    for name in sorted(breakdown):
-        row = breakdown[name]
-        print("{:<30} {:>6} {:>6} {:>6} {:>6}".format(
-            name, row["total"], row["H"], row["V"], row["D"]
-        ))
-
-    if diagnostics["unmatched_sizes"] or diagnostics["unmatched_types"]:
-        print("")
-        print("─" * 60)
-        print("UNMATCHED LABELS (not placed):")
-        print("─" * 60)
-        for label in diagnostics["unmatched_sizes"]:
-            print("  SIZE {:<12} x={:.0f} y={:.0f}".format(
-                label["text"], label["x"], label["y"]
-            ))
-        for label in diagnostics["unmatched_types"]:
-            print("  TYPE {:<12} x={:.0f} y={:.0f}".format(
-                label["text"], label["x"], label["y"]
-            ))
 
 
-def save_json(path, gondolas):
-    stats = summarise(gondolas)
-    payload = {
-        "total": stats["total"],
-        "horizontal": stats["horizontal"],
-        "vertical": stats["vertical"],
-        "diagonal": stats["diagonal"],
-        "gondolas": gondolas,
+# ============================================================
+# COUNT BY CODE AND ORIENTATION
+# ============================================================
+
+print(
+    "─" * 60
+)
+
+print(
+    "COUNT BY CODE:"
+)
+
+print(
+    "─" * 60
+)
+
+
+from collections import defaultdict
+
+
+breakdown = defaultdict(
+    lambda: {
+        "H": 0,
+        "V": 0,
+        "D": 0,
+        "total": 0
     }
-    folder = os.path.dirname(path)
-    if folder and not os.path.isdir(folder):
-        os.makedirs(folder)
-    with open(path, "w", encoding="utf-8") as handle:
-        json.dump(payload, handle, indent=2, ensure_ascii=False)
-    print("")
-    print("Saved to:")
-    print(path)
+)
 
 
-def main():
-    print("")
-    print("=" * 60)
-    print("  GONDOLA ORIENTATION DETECTOR")
-    print("  {}".format(SCRIPT_VERSION))
-    print("  Standalone file — gondola_lib.py is not imported")
-    print("=" * 60)
-    print("")
+for g in gondolas:
 
-    gondolas, diagnostics = extract_with_orientation(DXF_FILE_PATH)
-    print_report(gondolas, diagnostics)
-    save_json(OUTPUT_JSON, gondolas)
+    name = g["code"]
 
-    print("")
-    print("=" * 60)
-    print("  COMPLETE")
-    print("=" * 60)
+    ori = g[
+        "orientation"
+    ][0]
 
 
-if __name__ == "__main__":
-    main()
+    breakdown[name][ori] += 1
+
+    breakdown[name]["total"] += 1
+
+
+print(
+    "{:<30} {:>6} {:>6} {:>6} {:>6}".format(
+        "Code",
+        "Total",
+        "H",
+        "V",
+        "D"
+    )
+)
+
+
+print(
+    "─" * 58
+)
+
+
+for name in sorted(
+    breakdown.keys()
+):
+
+    b = breakdown[name]
+
+
+    print(
+        "{:<30} {:>6} {:>6} {:>6} {:>6}".format(
+
+            name,
+
+            b["total"],
+
+            b["H"],
+
+            b["V"],
+
+            b["D"]
+        )
+    )
+
+
+# ============================================================
+# SAVE JSON
+# ============================================================
+
+output = {
+
+    "total":
+        len(gondolas),
+
+    "horizontal":
+        len(horizontal),
+
+    "vertical":
+        len(vertical),
+
+    "diagonal":
+        len(diagonal),
+
+    "gondolas":
+        gondolas
+}
+
+
+print("")
+print("Saving JSON...")
+
+
+with open(
+    OUTPUT_JSON,
+    "w",
+    encoding="utf-8"
+) as f:
+
+    json.dump(
+        output,
+        f,
+        indent=2,
+        ensure_ascii=False
+    )
+
+
+print("")
+print(
+    "Saved to:"
+)
+print(
+    OUTPUT_JSON
+)
+
+
+# ============================================================
+# FINAL ANGLE REPORT
+# ============================================================
+
+print("")
+print("=" * 60)
+print("  ACTUAL TRACING ANGLES")
+print("=" * 60)
+print("")
+
+
+for g in gondolas:
+
+    print(
+        "  {:<30} "
+        "orientation={:<10} "
+        "angle={:>7.2f}° "
+        "x={:>8.0f} "
+        "y={:>8.0f}".format(
+
+            g["code"],
+
+            g["orientation"],
+
+            g.get(
+                "orientation_angle",
+                0
+            ),
+
+            g["x"],
+
+            g["y"]
+        )
+    )
+
+
+print("")
+print("=" * 60)
+print("  COMPLETE")
+print("=" * 60)
