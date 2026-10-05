@@ -41,6 +41,10 @@ from gondola_lib import (
     footprint_fit_error,
     pick_label_set,
     plan_extent,
+    plan_profile_from_segments,
+    turn_onto_bay,
+    turn_profile_onto_bay,
+    angular_delta,
     should_apply_cad_translation,
     should_scan_leftover,
     snap_line_angle,
@@ -559,6 +563,145 @@ class BayFitTests(unittest.TestCase):
     def test_no_geometry_at_all(self):
         self.assertIsNone(bay_fit_from_segments((0, 0), []))
         self.assertIsNone(bay_fit_from_segments((90000, 90000), [(0, 0, 1200, 0)]))
+
+
+def footprint_segments(cx, cy, length, depth, axis, shelves=3):
+    """A gondola as a family draws it: outline plus shelf lines."""
+    segs = rect_segments(cx, cy, length, depth, axis)
+    rad = math.radians(axis)
+    ux, uy = math.cos(rad), math.sin(rad)
+    nx, ny = -uy, ux
+    for i in range(1, shelves + 1):
+        off = depth * (i / (shelves + 1.0) - 0.5)
+        segs.append((
+            cx + nx * off - ux * length / 2.0,
+            cy + ny * off - uy * length / 2.0,
+            cx + nx * off + ux * length / 2.0,
+            cy + ny * off + uy * length / 2.0,
+        ))
+    return segs
+
+
+def side_along_bay(profile, turn, bay_axis):
+    """Which of a drawn footprint's two sides ends up along the bay."""
+    if angular_delta(profile["axis"] + turn, bay_axis) < 45.0:
+        return profile["length"]
+    return profile["depth"]
+
+
+class PlanProfileTests(unittest.TestCase):
+    """Reading a family's direction from what it draws, not its box."""
+
+    def test_reads_direction_size_and_centre(self):
+        segs = footprint_segments(3.0, 7.0, 1200.0, 600.0, 0.0)
+        profile = plan_profile_from_segments(segs)
+        self.assertAlmostEqual(profile["axis"], 0.0, delta=0.5)
+        self.assertAlmostEqual(profile["length"], 1200.0, delta=1.0)
+        self.assertAlmostEqual(profile["depth"], 600.0, delta=1.0)
+        self.assertAlmostEqual(profile["x"], 3.0, delta=0.01)
+        self.assertAlmostEqual(profile["y"], 7.0, delta=0.01)
+        self.assertGreater(profile["confidence"], 0.6)
+
+    def test_arms_sticking_out_do_not_turn_the_family(self):
+        # The V7 failure. Hang rails across the gondola make the
+        # bounding box 1200 x 1400 - deeper than it is long - so the
+        # box says the family faces 90 when it faces 0.
+        segs = footprint_segments(0.0, 0.0, 1200.0, 600.0, 0.0)
+        for x in (-400.0, 0.0, 400.0):
+            segs.append((x, -700.0, x, 700.0))
+
+        box_width = 1200.0
+        box_depth = 1400.0
+        self.assertEqual(
+            footprint_alignment_delta(box_width, box_depth, 0.0), -90.0
+        )
+
+        profile = plan_profile_from_segments(segs)
+        self.assertAlmostEqual(profile["axis"], 0.0, delta=0.5)
+        self.assertEqual(turn_onto_bay(profile["axis"], 0.0), 0.0)
+
+    def test_square_box_still_has_a_direction(self):
+        # A 1200 x 1200 box tells you nothing, so the old rule left the
+        # family at its default, which is why vertical bays were traced
+        # horizontally.
+        segs = footprint_segments(0.0, 0.0, 1200.0, 450.0, 90.0)
+        segs.append((-600.0, -600.0, 600.0, -600.0))
+        segs.append((-600.0, 600.0, 600.0, 600.0))
+
+        self.assertEqual(footprint_alignment_delta(1200.0, 1200.0, 90.0), 0.0)
+
+        profile = plan_profile_from_segments(segs)
+        self.assertAlmostEqual(profile["axis"], 90.0, delta=0.5)
+
+    def test_diagonal_family(self):
+        profile = plan_profile_from_segments(
+            footprint_segments(0.0, 0.0, 1200.0, 600.0, 135.0)
+        )
+        self.assertAlmostEqual(profile["axis"], 135.0, delta=0.5)
+
+    def test_nothing_to_read(self):
+        self.assertIsNone(plan_profile_from_segments([]))
+        self.assertIsNone(plan_profile_from_segments([(1.0, 1.0, 1.0, 1.0)]))
+
+    def test_turn_onto_bay(self):
+        self.assertEqual(turn_onto_bay(0.0, 90.0), 90.0)
+        self.assertEqual(turn_onto_bay(90.0, 0.0), -90.0)
+        self.assertEqual(turn_onto_bay(0.0, 135.0), -45.0)
+        self.assertEqual(turn_onto_bay(135.0, 90.0), -45.0)
+        self.assertEqual(turn_onto_bay(45.0, 45.0), 0.0)
+
+    def test_a_confident_profile_ignores_the_bay_sides(self):
+        profile = plan_profile_from_segments(
+            footprint_segments(0.0, 0.0, 1200.0, 600.0, 0.0)
+        )
+        # Bay is 600 along and 1200 across. The family is drawn the
+        # other way round, so it must turn, and the drawn direction
+        # already says so.
+        self.assertEqual(
+            turn_profile_onto_bay(profile, 90.0, (1200.0, 600.0)), 90.0
+        )
+
+    def test_an_unreadable_direction_falls_back_to_the_bay_sides(self):
+        # Body drawn along +X with rails drawn just as long across it,
+        # so neither direction holds a clear majority.
+        segs = footprint_segments(0.0, 0.0, 1200.0, 600.0, 0.0)
+        for x in (-500.0, -375.0, -250.0, -125.0, 0.0, 125.0, 250.0, 375.0, 500.0):
+            segs.append((x, -300.0, x, 300.0))
+        profile = plan_profile_from_segments(segs)
+        self.assertLess(profile["confidence"], 0.55)
+
+        # The drawn 1200 side must end up along the bay however the
+        # direction read came out.
+        for bay_axis in (0.0, 90.0, 45.0):
+            turn = turn_profile_onto_bay(profile, bay_axis, (1200.0, 600.0))
+            self.assertAlmostEqual(
+                side_along_bay(profile, turn, bay_axis), 1200.0, delta=1.0
+            )
+
+    def test_depth_alone_settles_an_unreadable_direction(self):
+        profile = {
+            "axis": 0.0,
+            "length": 1200.0,
+            "depth": 600.0,
+            "confidence": 0.4,
+        }
+        # The run is 600 deep, so the drawn 600 side belongs across it
+        # and the family stays as drawn.
+        self.assertEqual(turn_profile_onto_bay(profile, 0.0, (None, 600.0)), 0.0)
+        # A 1200 deep run wants the long side across it.
+        self.assertEqual(
+            turn_profile_onto_bay(profile, 0.0, (None, 1200.0)), -90.0
+        )
+
+    def test_no_bay_sides_leaves_the_drawn_direction(self):
+        profile = {
+            "axis": 0.0,
+            "length": 1200.0,
+            "depth": 1200.0,
+            "confidence": 0.4,
+        }
+        self.assertEqual(turn_profile_onto_bay(profile, 90.0, None), 90.0)
+        self.assertEqual(turn_profile_onto_bay(None, 90.0, None), 0.0)
 
 
 class FootprintAlignmentTests(unittest.TestCase):

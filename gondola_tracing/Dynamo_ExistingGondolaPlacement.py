@@ -1,7 +1,7 @@
 # Dynamo_ExistingGondolaPlacement
 # Revit 2025 / Dynamo CPython3 compatible
 #
-# Version 2026-10-05s-run-axis
+# Version 2026-10-05t-drawn-shape
 # Original File2 placement (CAD offset always on). Only orientation
 # reading and Existing-view lock are changed.
 #
@@ -20,11 +20,20 @@
 # DXF text "rotation" is ignored. It is almost always 0, and reading
 # it is what put every family at 0 degrees.
 #
-# Each family is then aligned by measuring its placed bounding box:
-# it is turned onto the bay axis about the footprint centre, and the
-# footprint centre is moved onto the bay centre. These families are
-# not centred on their origin, so rotating about the insertion point
+# Each family is then aligned by reading the footprint it actually
+# draws in plan: it is turned by the difference between the direction
+# it is drawn and the bay axis, about the drawn footprint centre, and
+# that centre is moved onto the bay centre. These families are not
+# centred on their origin, so rotating about the insertion point
 # swung the body off its bay.
+#
+# The direction is read from the drawn lines, not from the bounding
+# box. The box takes in hang rails, basket arms and header signage,
+# which stick out across a gondola, so it is often square or deeper
+# than the bay is long. A square box asked for no turn at all, which
+# is why vertical bays were traced horizontally, and a box made deep
+# by its arms asked for a quarter turn that a correctly placed family
+# did not need. The box is still used when no geometry can be read.
 #
 # "bay_length" / "bay_depth" are the sides of the gondola rectangle
 # the detector fitted in the CAD. When present they decide which
@@ -62,7 +71,13 @@ from Autodesk.Revit.DB import (
     BuiltInParameter,
     OverrideGraphicSettings,
     Color,
-    ImportInstance
+    ImportInstance,
+    Options,
+    GeometryInstance,
+    Solid,
+    Curve,
+    PolyLine,
+    ViewDetailLevel
 )
 
 from Autodesk.Revit.DB.Structure import StructuralType
@@ -77,7 +92,7 @@ JSON_PATH = r"C:\Users\msharan\OneDrive - Kmart Australia Limited\Desktop\Stores
 
 LEVEL_NAME = "00-GROUND"
 VIEW_NAME = "1.0 EXISTING CONDITIONS - GROUND"
-SCRIPT_VERSION = "2026-10-05s-run-axis"
+SCRIPT_VERSION = "2026-10-05t-drawn-shape"
 
 # Partial CAD import name.
 # Leave "" to automatically use the first suitable CAD import.
@@ -775,6 +790,91 @@ def fold_line_angle(angle):
     return angle
 
 
+def segment_length(seg):
+
+    return math.sqrt(
+        (seg[2] - seg[0]) ** 2 +
+        (seg[3] - seg[1]) ** 2
+    )
+
+
+def segment_angle(seg):
+
+    return fold_line_angle(
+        math.degrees(
+            math.atan2(
+                seg[3] - seg[1],
+                seg[2] - seg[0]
+            )
+        )
+    )
+
+
+def line_angle_delta(a, b):
+
+    delta = abs(
+        fold_line_angle(a) -
+        fold_line_angle(b)
+    )
+
+    if delta > 90.0:
+        delta = 180.0 - delta
+
+    return delta
+
+
+def _dominant_angle(segments):
+
+    """
+    Length-weighted dominant direction of a bundle of lines.
+    """
+
+    buckets = []
+
+    for seg in segments:
+
+        length = segment_length(seg)
+
+        if length <= 0.0:
+            continue
+
+        ang = segment_angle(seg)
+        placed = False
+
+        for bucket in buckets:
+            if line_angle_delta(bucket["angle"], ang) <= 8.0:
+                bucket["weight"] += length
+                bucket["angles"].append((ang, length))
+                placed = True
+                break
+
+        if not placed:
+            buckets.append({
+                "angle": ang,
+                "weight": length,
+                "angles": [(ang, length)]
+            })
+
+    if not buckets:
+        return None
+
+    buckets.sort(key=lambda b: b["weight"], reverse=True)
+    best = buckets[0]
+
+    x = sum(
+        math.cos(math.radians(2.0 * a)) * w
+        for a, w in best["angles"]
+    )
+    y = sum(
+        math.sin(math.radians(2.0 * a)) * w
+        for a, w in best["angles"]
+    )
+
+    return fold_line_angle(
+        math.degrees(math.atan2(y, x)) / 2.0
+    )
+
+
 def get_bay_axis(g):
 
     """
@@ -995,6 +1095,274 @@ def footprint_fit_error_mm(width, depth, bay_axis, bay_dims):
     )
 
 
+def plan_profile_from_segments(segments):
+
+    """
+    Which way a family is drawn in plan, how big it is, and its centre.
+
+    A bounding box cannot answer the first question. Hang rails, header
+    signage and basket arms stick out across a gondola, so the box is
+    often square or even deeper than the bay is long, and reading the
+    direction off it turns the family the wrong way or not at all.
+
+    The lines the family draws do answer it: the body is drawn with
+    long lines along its length and short ones across, so the direction
+    holding the most drawn length is the way the family faces.
+    """
+
+    cleaned = []
+    total = 0.0
+
+    for seg in segments or ():
+
+        length = segment_length(seg)
+
+        if length <= 1e-9:
+            continue
+
+        cleaned.append(seg)
+        total += length
+
+    if not cleaned or total <= 0.0:
+        return None
+
+    axis = _dominant_angle(cleaned)
+
+    if axis is None:
+        return None
+
+    along_weight = sum(
+        segment_length(s) for s in cleaned
+        if line_angle_delta(segment_angle(s), axis) <= 20.0
+    )
+
+    rad = math.radians(axis)
+    ux, uy = math.cos(rad), math.sin(rad)
+    nx, ny = -uy, ux
+
+    alongs = []
+    acrosses = []
+
+    for seg in cleaned:
+        for x, y in ((seg[0], seg[1]), (seg[2], seg[3])):
+            alongs.append(x * ux + y * uy)
+            acrosses.append(x * nx + y * ny)
+
+    along_mid = (min(alongs) + max(alongs)) / 2.0
+    across_mid = (min(acrosses) + max(acrosses)) / 2.0
+
+    return {
+        "axis": round(axis, 3),
+        "length": round(max(alongs) - min(alongs), 3),
+        "depth": round(max(acrosses) - min(acrosses), 3),
+        "x": round(along_mid * ux + across_mid * nx, 6),
+        "y": round(along_mid * uy + across_mid * ny, 6),
+        "confidence": round(along_weight / total, 4)
+    }
+
+
+def turn_onto_bay(profile_axis, bay_axis):
+
+    """
+    Degrees to turn a family that faces `profile_axis` onto the bay.
+    """
+
+    delta = fold_line_angle(bay_axis) - fold_line_angle(profile_axis)
+
+    if delta > 90.0:
+        delta -= 180.0
+    elif delta < -90.0:
+        delta += 180.0
+
+    return delta
+
+
+def turn_profile_onto_bay(
+    profile,
+    bay_axis,
+    bay_dims=None,
+    min_confidence=0.55
+):
+
+    """
+    Degrees to turn a drawn footprint onto its bay.
+
+    The drawn direction decides it. When a family draws nearly as much
+    length across itself as along - a square body, or one whose rails
+    and arms are as long as the body - that direction is a coin toss,
+    so the drawn sides are matched against the sides of the bay
+    instead. `bay_dims` is (length along the axis, depth across it);
+    the length may be None when only the run depth was fitted.
+    """
+
+    if not profile:
+        return 0.0
+
+    turn = turn_onto_bay(
+        profile.get("axis", 0.0),
+        bay_axis
+    )
+
+    if profile.get("confidence", 1.0) >= min_confidence:
+        return turn
+
+    length = profile.get("length")
+    depth = profile.get("depth")
+
+    if length is None or depth is None or abs(length - depth) < 1e-9:
+        return turn
+
+    if not bay_dims or bay_dims[1] is None:
+        return turn
+
+    bay_length, bay_depth = bay_dims[0], bay_dims[1]
+
+    as_drawn = abs(depth - bay_depth)
+    turned = abs(length - bay_depth)
+
+    if bay_length is not None:
+        as_drawn += abs(length - bay_length)
+        turned += abs(depth - bay_length)
+
+    if turned >= as_drawn - 1e-9:
+        return turn
+
+    # Turn back rather than forward, as footprint_alignment_delta does,
+    # so a family already lying along the bay's depth does not swing
+    # out over the aisle on its way round.
+    other = turn - 90.0
+
+    if other < -90.0:
+        other = turn + 90.0
+
+    return other
+
+
+def _collect_plan_segments(geometry, out, depth=0):
+
+    """
+    Flatten whatever a family draws into plan segments, in feet.
+    """
+
+    if geometry is None or depth > 4:
+        return
+
+    for obj in geometry:
+
+        try:
+
+            if isinstance(obj, GeometryInstance):
+
+                _collect_plan_segments(
+                    obj.GetInstanceGeometry(),
+                    out,
+                    depth + 1
+                )
+
+            elif isinstance(obj, Solid):
+
+                if obj.Edges.Size == 0:
+                    continue
+
+                for edge in obj.Edges:
+
+                    points = edge.Tessellate()
+
+                    for i in range(len(points) - 1):
+                        a = points[i]
+                        b = points[i + 1]
+                        out.append((a.X, a.Y, b.X, b.Y))
+
+            elif isinstance(obj, PolyLine):
+
+                points = obj.GetCoordinates()
+
+                for i in range(len(points) - 1):
+                    a = points[i]
+                    b = points[i + 1]
+                    out.append((a.X, a.Y, b.X, b.Y))
+
+            elif isinstance(obj, Curve):
+
+                points = obj.Tessellate()
+
+                for i in range(len(points) - 1):
+                    a = points[i]
+                    b = points[i + 1]
+                    out.append((a.X, a.Y, b.X, b.Y))
+
+        except Exception:
+            continue
+
+
+# How the family's own direction was measured, worst last. "box" and
+# "none" mean the drawn footprint could not be read, which is the case
+# that used to leave families facing the wrong way.
+PROFILE_SOURCE_NAMES = {
+    "view": "drawn in the view",
+    "coarse": "drawn at coarse detail",
+    "fine": "drawn at fine detail",
+    "box": "bounding box only",
+    "none": "not readable"
+}
+
+
+def instance_plan_profile(instance, view):
+
+    """
+    Read the footprint a family actually draws, in feet.
+
+    Tries what the view shows first, because that is what the store
+    planner compares against the CAD, then the coarse model geometry.
+    """
+
+    attempts = []
+
+    if view is not None:
+        attempts.append(("view", view, None))
+
+    attempts.append(("coarse", None, ViewDetailLevel.Coarse))
+    attempts.append(("fine", None, ViewDetailLevel.Fine))
+
+    for name, opt_view, detail in attempts:
+
+        try:
+
+            options = Options()
+            options.ComputeReferences = False
+            options.IncludeNonVisibleObjects = False
+
+            if opt_view is not None:
+                options.View = opt_view
+            elif detail is not None:
+                options.DetailLevel = detail
+
+            segments = []
+
+            _collect_plan_segments(
+                instance.get_Geometry(options),
+                segments
+            )
+
+            # Vertical edges collapse to a point in plan and say
+            # nothing about which way the family faces.
+            segments = [
+                s for s in segments
+                if segment_length(s) > 0.02
+            ]
+
+            profile = plan_profile_from_segments(segments)
+
+            if profile is not None and profile["length"] > 0.1:
+                profile["source"] = name
+                return profile
+
+        except Exception:
+            continue
+
+    return None
+
+
 def instance_plan_box(instance):
 
     """
@@ -1020,17 +1388,186 @@ def instance_plan_box(instance):
         return None
 
 
-def align_instance_to_bay(doc, instance, target, bay_axis, bay_dims=None):
+def align_by_profile(doc, instance, target, bay_axis, bay_dims, profile):
 
     """
-    Turn the placed footprint onto the bay axis, then centre it on
-    the bay point. Returns a short note for the report.
+    Turn and centre a family using the footprint it draws.
 
-    When the detector measured the drawn bay, bay_dims decides the turn
-    and the note reports how far the footprint still misses it, so a
-    family of the wrong size shows up in the report rather than on the
-    drawing.
+    The turn comes from the drawn direction. The drawn size only
+    settles the rare case where the family is as long as it is deep
+    and the direction is therefore a coin toss.
     """
+
+    delta = turn_profile_onto_bay(
+        profile,
+        bay_axis,
+        bay_dims
+    )
+
+    centre_x = profile["x"]
+    centre_y = profile["y"]
+
+    rotated = False
+
+    if abs(delta) > 0.01:
+
+        pivot = Line.CreateBound(
+            XYZ(centre_x, centre_y, target.Z),
+            XYZ(centre_x, centre_y, target.Z + 1.0)
+        )
+
+        try:
+
+            ElementTransformUtils.RotateElement(
+                doc,
+                instance.Id,
+                pivot,
+                math.radians(delta)
+            )
+
+            rotated = True
+
+        except Exception:
+            pass
+
+    shift_x = target.X - centre_x
+    shift_y = target.Y - centre_y
+
+    moved = False
+
+    if abs(shift_x) > 1e-6 or abs(shift_y) > 1e-6:
+
+        try:
+
+            ElementTransformUtils.MoveElement(
+                doc,
+                instance.Id,
+                XYZ(shift_x, shift_y, 0.0)
+            )
+
+            moved = True
+
+        except Exception:
+            pass
+
+    fit_note = ""
+
+    if bay_dims:
+
+        # Which drawn side ends up along the bay depends on the turn,
+        # so compare the sides the way they finish, not as measured.
+        if line_angle_delta(profile["axis"] + delta, bay_axis) < 45.0:
+            along, across = profile["length"], profile["depth"]
+        else:
+            along, across = profile["depth"], profile["length"]
+
+        if bay_dims[0] is None:
+
+            fit_note = " fit=(?,{:+.0f}) mm".format(
+                (across - bay_dims[1]) / MM_TO_FT
+            )
+
+        else:
+
+            fit_note = " fit=({:+.0f},{:+.0f}) mm".format(
+                (along - bay_dims[0]) / MM_TO_FT,
+                (across - bay_dims[1]) / MM_TO_FT
+            )
+
+    return (
+        "axis={:.1f}° drawn={:.1f}° turned={:.1f}° centred=({:.0f},{:.0f}) mm"
+        " [{}]{}".format(
+            fold_line_angle(bay_axis),
+            profile["axis"],
+            delta if rotated else 0.0,
+            shift_x * 304.8 if moved else 0.0,
+            shift_y * 304.8 if moved else 0.0,
+            profile["source"],
+            fit_note
+        )
+    )
+
+
+def align_instance_to_bay(
+    doc,
+    instance,
+    target,
+    bay_axis,
+    bay_dims=None,
+    view=None,
+    profile_cache=None
+):
+
+    """
+    Turn the footprint the family draws onto the bay axis, then centre
+    it on the bay point. Returns a short note for the report.
+
+    The family's own direction is read from the lines it draws, not
+    from its bounding box. The box includes hang rails, basket arms and
+    header signage, which stick out across a gondola, so it is often
+    square or deeper than the bay is long. Trusting it left families at
+    their default direction on bays that needed turning, and turned
+    families that were already right.
+    """
+
+    location = None
+
+    try:
+        location = instance.Location.Point
+    except Exception:
+        location = None
+
+    cache_key = None
+
+    if profile_cache is not None and location is not None:
+
+        try:
+            cache_key = instance.Symbol.Id.IntegerValue
+        except Exception:
+            cache_key = None
+
+    profile = None
+
+    if cache_key is not None and cache_key in profile_cache:
+
+        cached = profile_cache[cache_key]
+
+        if cached is not None:
+            profile = dict(cached)
+            profile["x"] = location.X + cached["dx"]
+            profile["y"] = location.Y + cached["dy"]
+
+    else:
+
+        profile = instance_plan_profile(instance, view)
+
+        if cache_key is not None:
+
+            if profile is None:
+                profile_cache[cache_key] = None
+            else:
+                # Reading geometry is the slow part, and every instance
+                # is placed unturned at its own point, so one
+                # measurement per family type is enough. Keep the
+                # centre as an offset from that point.
+                entry = dict(profile)
+                entry["dx"] = profile["x"] - location.X
+                entry["dy"] = profile["y"] - location.Y
+                profile_cache[cache_key] = entry
+
+    if profile is not None:
+
+        return (
+            align_by_profile(
+                doc,
+                instance,
+                target,
+                bay_axis,
+                bay_dims,
+                profile
+            ),
+            profile["source"]
+        )
 
     box = instance_plan_box(instance)
 
@@ -1056,7 +1593,10 @@ def align_instance_to_bay(doc, instance, target, bay_axis, bay_dims=None):
                 angle
             )
 
-        return "no bounding box, rotated about insertion point"
+        return (
+            "no geometry to read, rotated about insertion point",
+            "none"
+        )
 
     min_x, min_y, max_x, max_y = box
 
@@ -1140,13 +1680,15 @@ def align_instance_to_bay(doc, instance, target, bay_axis, bay_dims=None):
         )
 
     return (
-        "axis={:.1f}° turned={:.1f}° centred=({:.0f},{:.0f}) mm{}".format(
+        "axis={:.1f}° turned={:.1f}° centred=({:.0f},{:.0f}) mm"
+        " [bounding box]{}".format(
             fold_line_angle(bay_axis),
             delta if rotated else 0.0,
             shift_x * 304.8 if moved else 0.0,
             shift_y * 304.8 if moved else 0.0,
             fit_note
-        )
+        ),
+        "box"
     )
 
 
@@ -1921,6 +2463,8 @@ wall_placed = []
 orientation_report = []
 alignment_notes = []
 on_cad_bay = 0
+profile_cache = {}
+profile_sources = {}
 
 
 for g in gondolas:
@@ -2139,29 +2683,38 @@ for g in gondolas:
         #
         # Rotating about the insertion point swung the body off the
         # bay, because most of these families are not centred on their
-        # origin. Measure the placed footprint instead:
+        # origin. Read the footprint the family draws instead:
         #
-        #   1. rotate by the difference between the footprint's long
-        #      axis and the bay's long axis, about the footprint centre
-        #   2. move the footprint centre onto the bay centre
+        #   1. rotate by the difference between the direction the
+        #      family is drawn and the bay's axis, about the drawn
+        #      footprint's centre
+        #   2. move that centre onto the bay centre
         #
         # This needs no assumption about family origin or which way a
-        # type is drawn at 0 degrees.
+        # type is drawn at 0 degrees, and unlike a bounding box it is
+        # not thrown by rails and arms sticking out across the bay.
         #
-        # bay_length / bay_depth come from the gondola rectangle the
-        # detector fitted in the CAD, and settle which quarter turn
-        # lands the footprint on it.
+        # bay_length / bay_depth come from the gondola the detector
+        # fitted in the CAD, and settle the rare family that is as
+        # long as it is deep.
 
         bay_axis = get_bay_axis(g)
         bay_dims = get_bay_dims_ft(g)
 
-        align_note = align_instance_to_bay(
+        align_note, align_read = align_instance_to_bay(
             doc,
             instance,
             point,
             bay_axis,
-            bay_dims
+            bay_dims,
+            target_view,
+            profile_cache
         )
+
+        profile_sources[align_read] = profile_sources.get(
+            align_read,
+            0
+        ) + 1
 
         source = str(
             g.get(
@@ -2367,6 +2920,20 @@ lines = [
     "  Angle read from CAD  : {} of {}".format(
         on_cad_bay,
         len(placed)
+    ),
+
+    "  Family shape read as : {}".format(
+        ", ".join(
+            "{} {}".format(
+                profile_sources[k],
+                PROFILE_SOURCE_NAMES.get(k, k)
+            )
+            for k in sorted(
+                profile_sources,
+                key=lambda k: -profile_sources[k]
+            )
+        )
+        or "nothing placed"
     ),
 
     "",

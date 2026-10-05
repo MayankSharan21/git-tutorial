@@ -1,7 +1,7 @@
 # Gondola_OrientationDetector.py
 #
 # Original File1 collector (the run that filled most bays).
-# Version 2026-10-05s-run-axis
+# Version 2026-10-05t-drawn-shape
 #
 # Collect is unchanged: leftover named blocks + modelspace TEXT.
 # Position and orientation are corrected after collect:
@@ -76,7 +76,7 @@ except Exception:
 DXF_FILE_PATH = r"C:\Users\msharan\OneDrive - Kmart Australia Limited\Desktop\Stores Foundry\PPT , Requirements, Demo videos, Pics\1131 Marrickville-Existing plan trace exercise_2 - Floor Plan - 1-0 EXISTING CONDITIONS - GROUND.dxf"
 
 OUTPUT_JSON = r"C:\Users\msharan\OneDrive - Kmart Australia Limited\Desktop\Stores Foundry\Tracing\json\gondola_data_Marrickville_New4.json"
-SCRIPT_VERSION = "2026-10-05s-run-axis"
+SCRIPT_VERSION = "2026-10-05t-drawn-shape"
 
 
 # ============================================================

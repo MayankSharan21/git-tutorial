@@ -32,6 +32,17 @@ The 5 Oct 2026 run placed **1526 / 1593** items and every family landed at **0°
 | V4 PDF: coverage good, families beside their bays and some runs 90° out | Position came from the SIZE label, pairing reached into the next bay at 1500 mm, and rotation about the insertion point moved each body off its bay |
 | V5 PDF: right size, 117 of 254 bays 90° out, centres ~18 pt off | Orientation came from voting on neighbouring label positions. An aisle has the same 1200 mm spacing as a run, so the vote cannot tell a run from the gap beside it |
 | V6 PDF: identical to V5 (119 of 258 bays 90° out) | The bay-rectangle fit found no geometry and fell back to voting without saying so. It needed one rectangle per bay, searched by edge *midpoint*, and never looked inside nested blocks — so a run drawn as one long outline inside a block was invisible |
+| V7 PDF: centres land on the bays, but ~40% still 90° out — horizontal bays and vertical bays wrong in *different* ways | Two causes, see below |
+
+### Why horizontal and vertical bays were the worst, and in opposite directions
+
+Measured off the V7 export. Bays come from the black CAD line work; the direction the CAD writes its own SIZE / TYPE labels is the independent check.
+
+**Horizontal bays were read 90° out by the detector.** V7 was exported before the run-length rule landed, so the detector still picked the direction with the *narrower* way across. A run 1200 wide per bay but 1500 deep is narrower across its length than across its depth, so the rule chose the depth. That read the bay axis 90° out on **150 of 782 bays (19%)** — **26% of horizontal bays** against 14% of vertical ones. Against the CAD's own label direction the old rule agreed 76% of the time; the run-length rule agrees 96%.
+
+**Vertical bays were traced horizontally by Dynamo.** The turn was decided from `instance.get_BoundingBox(None)`, the family's 3D model box, via `width >= depth → faces 0°, else 90°`. That box takes in the base deck, every shelf, the back panel, hang rails, basket arms and header signage, all of which project across a gondola, so it is frequently square or elongated the wrong way: on the footprints these families actually draw, **14% are square to within 10%** and another **4% are elongated across the body**. When the box is square the rule returns a turn of **zero**, so the family is left exactly as drawn — and these families are all drawn along +X, i.e. horizontal. On a horizontal bay that happens to be right, so the failure is invisible; on a vertical bay it is a 90° error. That is the whole reason vertical gondolas came out horizontal.
+
+The same box also turns families that were already correct: when rails and arms make the box deeper than the body is long, the rule reports the family as facing 90° and turns it off a horizontal bay. Replaying both rules on the real traced footprints, the box rule is 90° out on **15%** of families and the drawn-footprint rule on **1%**.
 
 ## What the new detector does
 
@@ -47,7 +58,7 @@ The 5 Oct 2026 run placed **1526 / 1593** items and every family landed at **0°
 - Of the two directions a cell could run, it takes the one whose sides **run further**. The sides of a run are drawn as one line past every bay; the divisions between bays are a single bay long. Picking the narrower way across instead is what turned a 1200 wide by 1500 deep run 90°.
 - `bay_length` is measured along the axis and `bay_depth` across it, as drawn. They are not sorted, because a run can be deeper than it is long.
 - If the labels are in a block and the outlines in modelspace, their coordinates look unrelated. The detector uses the block's own INSERT as the exact transform between the two rather than guessing an offset, and says so when it does.
-- Dynamo measures each placed footprint and turns it onto the bay axis about the footprint centre, then centres it on the bay. Rotating about the insertion point swung bodies off their bays, because these families are not centred on their origin.
+- Dynamo reads the footprint each family **draws in plan**, turns it by the difference between that direction and the bay axis about the drawn footprint centre, then centres it on the bay. Rotating about the insertion point swung bodies off their bays, because these families are not centred on their origin.
 - Matches SIZE+TYPE with mutual nearest-neighbour and a ~700 mm stack window so adjacent 1200 mm bays are not paired.
 - Infers orientation from neighbouring bay centres (1200 / 1500 / 1800 mm runs). This is what aligns the Marrickville south wall, west wall, and 45° corner.
 - Writes three angle fields:
@@ -57,7 +68,9 @@ The 5 Oct 2026 run placed **1526 / 1593** items and every family landed at **0°
 ## What the new Dynamo script does
 
 - Uses `revit_angle` / `angle` / `orientation_angle` only. Ignores text `rotation`.
-- Chooses the quarter turn whose resulting extents match `bay_length` / `bay_depth`, so a family whose bounding box is bigger than its footprint still lands along the bay. `bay_depth` on its own is enough. The report shows `Angle read from CAD: N of M` and a per-item `fit=(+dx,+dy) mm`, which is where a wrong family size shows up.
+- **Takes the family's own direction from the lines it draws**, not from its bounding box. The body is drawn with long lines along its length and short ones across, so the direction holding the most drawn length is the way the family faces. The drawn geometry is read from the target view first, then at coarse and fine detail, and is measured once per family type and reused.
+- Only when the drawn direction is ambiguous — less than 55% of the drawn length runs along one line — does it fall back to choosing the quarter turn whose extents match `bay_length` / `bay_depth`. `bay_depth` on its own is enough. If no geometry can be read at all it falls back to the bounding box.
+- The report shows `Angle read from CAD: N of M`, `Family shape read as: ...` (how many families had their direction measured from drawn geometry versus the bounding box), and a per-item `axis=… drawn=… turned=…` line with `fit=(+dx,+dy) mm`, which is where a wrong family size shows up.
 - Looks up TYPE_MAP case-insensitively (`6WAY` works).
 - Falls back to loaded End_Panel types when `End_Panel_Decks` types are missing.
 - `EXISTING_ONLY = True`: refuses Proposed levels, overlay views, and the selling-floor CAD. Places only on Existing.
@@ -67,7 +80,7 @@ The 5 Oct 2026 run placed **1526 / 1593** items and every family landed at **0°
 
 ## How to run
 
-1. Replace **both** files. Dynamo must report `2026-10-05s-run-axis`. Re-run the detector (leftover named blocks, mutual-nearest pairing, XY = bay centre) so it writes `gondola_data_Marrickville_New4.json`, then run Dynamo. Do not reuse New2 / New3.
+1. Replace **both** files. Dynamo must report `2026-10-05t-drawn-shape`. Re-run the detector (leftover named blocks, mutual-nearest pairing, XY = bay centre) so it writes `gondola_data_Marrickville_New4.json`, then run Dynamo. Do not reuse New2 / New3.
 2. Copy only `Gondola_OrientationDetector.py` into the Tracing folder. It is standalone — an old `gondola_lib.py` in that folder is ignored.
 3. Edit `DXF_FILE_PATH` and `OUTPUT_JSON` at the top of `Gondola_OrientationDetector.py`. Use the Existing Conditions GROUND DXF.
 4. `pip install ezdxf` if needed, then run the detector.

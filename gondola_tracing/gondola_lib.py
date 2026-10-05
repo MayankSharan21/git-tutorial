@@ -1145,12 +1145,125 @@ def bay_axis_from_item(item):
     return 0.0
 
 
+def plan_profile_from_segments(segments):
+    """
+    Which way a family is drawn in plan, how big it is, and its centre.
+
+    A bounding box cannot answer the first question. Hang rails, header
+    signage and basket arms stick out across a gondola, so the box is
+    often square or even deeper than the bay is long, and reading the
+    direction off it turns the family the wrong way or not at all.
+
+    The lines the family draws do answer it: the body is drawn with
+    long lines along its length and short ones across, so the direction
+    holding the most drawn length is the way the family faces.
+
+    Returns {'axis', 'length', 'depth', 'x', 'y', 'confidence'}, where
+    confidence is the share of drawn length running along the axis.
+    """
+    cleaned = []
+    total = 0.0
+    for seg in segments or ():
+        length = segment_length(seg)
+        if length <= 1e-9:
+            continue
+        cleaned.append(seg)
+        total += length
+    if not cleaned or total <= 0.0:
+        return None
+
+    axis = _dominant_angle(cleaned)
+    if axis is None:
+        return None
+
+    along_weight = sum(
+        segment_length(s) for s in cleaned
+        if angular_delta(segment_angle(s), axis) <= 20.0
+    )
+
+    rad = math.radians(axis)
+    ux, uy = math.cos(rad), math.sin(rad)
+    nx, ny = -uy, ux
+
+    alongs = []
+    acrosses = []
+    for seg in cleaned:
+        for x, y in ((seg[0], seg[1]), (seg[2], seg[3])):
+            alongs.append(x * ux + y * uy)
+            acrosses.append(x * nx + y * ny)
+
+    along_mid = (min(alongs) + max(alongs)) / 2.0
+    across_mid = (min(acrosses) + max(acrosses)) / 2.0
+
+    return {
+        "axis": round(axis, 3),
+        "length": round(max(alongs) - min(alongs), 3),
+        "depth": round(max(acrosses) - min(acrosses), 3),
+        "x": round(along_mid * ux + across_mid * nx, 6),
+        "y": round(along_mid * uy + across_mid * ny, 6),
+        "confidence": round(along_weight / total, 4),
+    }
+
+
+def turn_onto_bay(profile_axis, bay_axis):
+    """Degrees to turn a family that faces `profile_axis` onto the bay."""
+    delta = fold_line_angle(bay_axis) - fold_line_angle(profile_axis)
+    if delta > 90.0:
+        delta -= 180.0
+    elif delta < -90.0:
+        delta += 180.0
+    return delta
+
+
+def turn_profile_onto_bay(profile, bay_axis, bay_dims=None, min_confidence=0.55):
+    """
+    Degrees to turn a drawn footprint onto its bay.
+
+    The drawn direction decides it. When a family draws nearly as much
+    length across itself as along - a square body, or one whose rails
+    and arms are as long as the body - that direction is a coin toss,
+    so the drawn sides are matched against the sides of the bay
+    instead. `bay_dims` is (length along the axis, depth across it);
+    the length may be None when only the run depth was fitted.
+    """
+    if not profile:
+        return 0.0
+    turn = turn_onto_bay(profile.get("axis", 0.0), bay_axis)
+    if profile.get("confidence", 1.0) >= min_confidence:
+        return turn
+
+    length = profile.get("length")
+    depth = profile.get("depth")
+    if length is None or depth is None or abs(length - depth) < 1e-9:
+        return turn
+    if not bay_dims or bay_dims[1] is None:
+        return turn
+
+    bay_length, bay_depth = bay_dims[0], bay_dims[1]
+    as_drawn = abs(depth - bay_depth)
+    turned = abs(length - bay_depth)
+    if bay_length is not None:
+        as_drawn += abs(length - bay_length)
+        turned += abs(depth - bay_length)
+    if turned >= as_drawn - 1e-9:
+        return turn
+
+    # Turn back rather than forward, as footprint_alignment_delta does,
+    # so a family already lying along the bay's depth does not swing
+    # out over the aisle on its way round.
+    other = turn - 90.0
+    if other < -90.0:
+        other = turn + 90.0
+    return other
+
+
 def footprint_alignment_delta(width, depth, bay_axis):
     """
     Degrees to turn a placed footprint so its long side follows the bay.
 
-    Measuring the placed box avoids guessing which way a family type is
-    drawn at rotation 0, and avoids assuming the origin is centred.
+    Only used when the family's drawn lines cannot be read. Measuring
+    the placed box avoids guessing which way a family type is drawn at
+    rotation 0, and avoids assuming the origin is centred.
     """
     bay_axis = fold_line_angle(bay_axis)
     try:
