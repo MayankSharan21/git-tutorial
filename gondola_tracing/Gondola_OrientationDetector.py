@@ -3,6 +3,10 @@
 # Standalone VS Code / system Python script. Do not run in Dynamo.
 # This file does not need gondola_lib.py. If an old gondola_lib.py is
 # sitting in the same folder, it is ignored.
+#
+# Version 2026-10-05c-existing-restore
+# If Dynamo reports Total JSON items : 0, this file was not the one
+# that wrote the JSON, or an older detector emptied it.
 
 import platform as _platform
 
@@ -508,8 +512,12 @@ def layer_bucket(layer):
 
 def filter_proposed_layers(raw_labels, existing_only=True):
     """
-    Tracing is Existing-only. Proposed / overlay layers are dropped.
-    Untagged layers are kept so a pure existing DXF still works.
+    Tracing is Existing-only. Proposed / overlay layers are dropped
+    when other labels remain. Untagged layers are kept.
+
+    If every label sits on a proposed-named layer, keep them. Existing
+    Conditions exports often put the real store text on a layer called
+    PROPOSED / SELLING FLOOR. Dropping that set writes an empty JSON.
     """
     buckets = defaultdict(list)
     for label in raw_labels:
@@ -523,6 +531,11 @@ def filter_proposed_layers(raw_labels, existing_only=True):
 
     if buckets["proposed"]:
         kept = buckets["existing"] + buckets["unknown"]
+        if not kept:
+            return list(raw_labels), {
+                "dropped_proposed_layer": 0,
+                "kept_existing_layer": len(raw_labels),
+            }
         return kept, {
             "dropped_proposed_layer": len(buckets["proposed"]),
             "kept_existing_layer": len(kept),
@@ -531,6 +544,100 @@ def filter_proposed_layers(raw_labels, existing_only=True):
         "dropped_proposed_layer": 0,
         "kept_existing_layer": len(raw_labels),
     }
+
+
+def label_source_scope(label):
+    """Scope from the INSERT / leftover block name, then the layer."""
+    block_scope = classify_revit_name(label.get("block") or "")
+    if block_scope in ("existing", "proposed", "overlay"):
+        return block_scope
+    return classify_revit_name(label.get("layer") or "")
+
+
+def keep_existing_source_labels(labels, existing_only=True):
+    """
+    Prefer labels from existing-named INSERTs / leftover blocks.
+
+    Do not return empty just because the only XREF is named
+    Selling floor or Overlay. Those files often hold the actual
+    existing-plan codes.
+    """
+    if not existing_only or not labels:
+        return list(labels), {
+            "dropped_proposed_source": 0,
+            "kept_source": len(labels or []),
+        }
+
+    buckets = defaultdict(list)
+    for label in labels:
+        buckets[label_source_scope(label)].append(label)
+
+    existing = buckets["existing"]
+    overlay = buckets["overlay"]
+    proposed = buckets["proposed"]
+    neutral = buckets["neutral"]
+
+    if existing:
+        kept = existing + neutral
+        return kept, {
+            "dropped_proposed_source": len(proposed) + len(overlay),
+            "kept_source": len(kept),
+        }
+
+    if overlay or neutral:
+        if proposed:
+            kept = overlay + neutral
+            return kept, {
+                "dropped_proposed_source": len(proposed),
+                "kept_source": len(kept),
+            }
+        kept = overlay + neutral
+        return kept, {
+            "dropped_proposed_source": 0,
+            "kept_source": len(kept),
+        }
+
+    return list(labels), {
+        "dropped_proposed_source": 0,
+        "kept_source": len(labels),
+    }
+
+
+def has_classified_gondola(labels):
+    """True when any raw label is a SIZE, TYPE, PAIR, or FULL code."""
+    for label in labels or []:
+        if identify_text(label.get("text", "")):
+            return True
+    return False
+
+
+def should_scan_leftover(labels):
+    """Scan leftover blocks only when modelspace has no gondola codes."""
+    return not has_classified_gondola(labels)
+
+
+def is_layout_block(name):
+    text = str(name or "").strip().lower()
+    if not text:
+        return True
+    return (
+        text.startswith("*model_space")
+        or text.startswith("*paper_space")
+        or text in ("*model_space", "*paper_space")
+    )
+
+
+def load_gondola_items(data):
+    """Accept {gondolas: [...]} or a bare list from older detector runs."""
+    if isinstance(data, list):
+        return data
+    if not isinstance(data, dict):
+        return []
+    for key in ("gondolas", "items", "data"):
+        value = data.get(key)
+        if isinstance(value, list):
+            return value
+    return []
 
 
 def merge_nearby_phrases(raw_labels, dist=550.0):
@@ -1031,8 +1138,10 @@ DXF_FILE_PATH = r"C:\Users\msharan\OneDrive - Kmart Australia Limited\Desktop\St
 
 OUTPUT_JSON = r"C:\Users\msharan\OneDrive - Kmart Australia Limited\Desktop\Stores Foundry\Tracing\json\gondola_data_Marrickville_New2.json"
 
-# Never explode proposed / selling-floor XREFs or leftover proposed blocks.
+# Prefer Existing-named sources. Never write an empty JSON just because
+# the only XREF or leftover block is named Selling floor / Overlay.
 EXISTING_ONLY = True
+SCRIPT_VERSION = "2026-10-05c-existing-restore"
 
 
 def _entity_point(entity):
@@ -1067,7 +1176,7 @@ def _entity_text(entity):
         return ""
 
 
-def _as_label(entity):
+def _as_label(entity, block_name=""):
     point = _entity_point(entity)
     if point is None:
         return None
@@ -1080,10 +1189,18 @@ def _as_label(entity):
         "y": point[1],
         "rotation": _entity_rotation(entity),
         "layer": _entity_layer(entity),
+        "block": block_name or "",
     }
 
 
-def _walk_insert(entity, collector, depth=0):
+def _child_scope_name(child_name, parent_name=""):
+    child_name = child_name or ""
+    if child_name and not child_name.startswith("*"):
+        return child_name
+    return parent_name or child_name
+
+
+def _walk_insert(entity, collector, depth=0, block_name=""):
     if depth > 8:
         return
     try:
@@ -1097,33 +1214,63 @@ def _walk_insert(entity, collector, depth=0):
         if block is None:
             return
         for child in block:
-            _collect_entity(child, collector, depth + 1)
+            _collect_entity(child, collector, depth + 1, block_name)
         return
 
     for child in virtuals:
-        _collect_entity(child, collector, depth + 1)
+        _collect_entity(child, collector, depth + 1, block_name)
 
 
-def _collect_entity(entity, collector, depth=0):
+def _collect_entity(entity, collector, depth=0, block_name=""):
     try:
         dxftype = entity.dxftype()
     except Exception:
         return
 
     if dxftype in ("TEXT", "MTEXT", "ATTRIB", "ATTDEF"):
-        label = _as_label(entity)
+        label = _as_label(entity, block_name)
         if label is not None:
             collector.append(label)
         return
 
     if dxftype == "INSERT":
         try:
-            block_name = entity.dxf.name
+            child_name = entity.dxf.name
         except Exception:
-            block_name = ""
-        if EXISTING_ONLY and is_proposed_scope(block_name):
-            return
-        _walk_insert(entity, collector, depth)
+            child_name = ""
+        scope_name = _child_scope_name(child_name, block_name)
+        _walk_insert(entity, collector, depth, scope_name)
+
+
+def _scan_leftover_blocks(doc, skip_proposed=True):
+    extra = []
+    seen = set()
+    skipped_proposed = 0
+    for block_def in doc.blocks:
+        try:
+            name = block_def.name
+        except Exception:
+            continue
+        if is_layout_block(name):
+            continue
+        if skip_proposed and EXISTING_ONLY and is_proposed_scope(name):
+            skipped_proposed += 1
+            continue
+        for entity in block_def:
+            try:
+                if entity.dxftype() not in ("TEXT", "MTEXT", "ATTRIB", "ATTDEF"):
+                    continue
+                label = _as_label(entity, name)
+                if label is None:
+                    continue
+                key = (round(label["x"], 1), round(label["y"], 1), label["text"])
+                if key in seen:
+                    continue
+                extra.append(label)
+                seen.add(key)
+            except Exception:
+                pass
+    return extra, skipped_proposed
 
 
 def collect_dxf_labels(dxf_path):
@@ -1147,39 +1294,31 @@ def collect_dxf_labels(dxf_path):
             _collect_entity(entity, labels)
         except Exception:
             pass
+    print("Modelspace labels : {}".format(len(labels)))
 
-    extra = []
-    if not labels:
-        print("Modelspace had no labels. Scanning leftover block definitions...")
-        seen = set()
-        for block_def in doc.blocks:
-            try:
-                name = block_def.name
-            except Exception:
-                continue
-            if name.startswith("*"):
-                continue
-            if EXISTING_ONLY and is_proposed_scope(name):
-                continue
-            for entity in block_def:
-                try:
-                    if entity.dxftype() not in ("TEXT", "MTEXT", "ATTRIB", "ATTDEF"):
-                        continue
-                    label = _as_label(entity)
-                    if label is None:
-                        continue
-                    key = (round(label["x"], 1), round(label["y"], 1), label["text"])
-                    if key in seen:
-                        continue
-                    extra.append(label)
-                    seen.add(key)
-                except Exception:
-                    pass
+    leftover_used = 0
+    if should_scan_leftover(labels):
+        print("Modelspace had no gondola codes. Scanning leftover block definitions...")
+        extra, skipped_proposed = _scan_leftover_blocks(doc, skip_proposed=True)
+        print(
+            "Leftover (existing/unknown): {}  skipped proposed-named: {}".format(
+                len(extra), skipped_proposed
+            )
+        )
+        if should_scan_leftover(extra):
+            print("Leftover existing/unknown had no codes. Including proposed-named leftover blocks...")
+            extra, _ = _scan_leftover_blocks(doc, skip_proposed=False)
+            print("Leftover (all named blocks): {}".format(len(extra)))
+        leftover_used = len(extra)
         labels.extend(extra)
     else:
-        print("Skipping leftover block definitions (modelspace already has labels).")
+        print("Modelspace already has gondola codes. Skipping leftover blocks.")
 
-    print("Labels collected: {}".format(len(labels)))
+    labels, source_info = keep_existing_source_labels(labels, EXISTING_ONLY)
+    print("Labels after source filter: {}".format(len(labels)))
+    print("Dropped proposed-named source: {}".format(source_info["dropped_proposed_source"]))
+    print("Leftover labels used    : {}".format(leftover_used))
+    print("Labels collected        : {}".format(len(labels)))
     print("")
     return labels
 
@@ -1312,6 +1451,8 @@ def main():
     print("")
     print("=" * 60)
     print("  GONDOLA ORIENTATION DETECTOR")
+    print("  {}".format(SCRIPT_VERSION))
+    print("  Standalone file — gondola_lib.py is not imported")
     print("=" * 60)
     print("")
 

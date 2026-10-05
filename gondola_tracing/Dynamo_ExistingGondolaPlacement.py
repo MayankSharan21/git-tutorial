@@ -1,6 +1,8 @@
 # Dynamo_ExistingGondolaPlacement
 # Revit 2025 / Dynamo CPython3 compatible
 #
+# Version 2026-10-05c-existing-restore
+#
 # Places existing-condition gondolas from the JSON written by
 # Gondola_OrientationDetector.py.
 #
@@ -50,6 +52,7 @@ MM_TO_FT = 1.0 / 304.8
 
 # Hard rule: place only on Existing. Never Proposed, selling-floor, or overlay.
 EXISTING_ONLY = True
+SCRIPT_VERSION = "2026-10-05c-existing-restore"
 
 USE_JSON_ANGLE = True
 ANGLE_SIGN = 1.0
@@ -656,14 +659,34 @@ def choose_existing_view_name(views, level_name):
 # JSON
 # ---------------------------------------------------------------------------
 
+def load_gondola_items(data):
+    """Accept {gondolas: [...]} or a bare list from older detector runs."""
+    if isinstance(data, list):
+        return data
+    if not isinstance(data, dict):
+        return []
+    for key in ("gondolas", "items", "data"):
+        value = data.get(key)
+        if isinstance(value, list):
+            return value
+    return []
+
+
 if not os.path.isfile(JSON_PATH):
     OUT = "JSON NOT FOUND:\n\n{}".format(JSON_PATH)
     raise FileNotFoundError(OUT)
 
+json_size = os.path.getsize(JSON_PATH)
 with open(JSON_PATH, "r") as handle:
     data = json.load(handle)
 
-gondolas = data.get("gondolas", [])
+gondolas = load_gondola_items(data)
+if isinstance(data, dict):
+    json_keys = ", ".join(sorted(str(key) for key in data.keys()))
+    json_reported_total = data.get("total", "n/a")
+else:
+    json_keys = "(top-level list)"
+    json_reported_total = len(gondolas)
 
 doc = DocumentManager.Instance.CurrentDBDocument
 if doc is None:
@@ -912,11 +935,8 @@ phase_info = existing_phase.Name if existing_phase else "not set"
 
 
 # ---------------------------------------------------------------------------
-# Transaction
+# Transaction — never delete existing families when the JSON is empty
 # ---------------------------------------------------------------------------
-
-t = Transaction(doc, "Place Existing Conditions Gondolas")
-t.Start()
 
 MANAGED_FAMILIES = {
     "Floor_Gondola",
@@ -932,186 +952,195 @@ MANAGED_FAMILIES = {
 }
 
 deleted_count = 0
-all_instances = list(
-    FilteredElementCollector(doc).OfClass(FamilyInstance).ToElements()
-)
-for inst in all_instances:
-    try:
-        family_name = get_instance_family_name(inst)
-        if family_name not in MANAGED_FAMILIES:
-            continue
-        lv_param = None
-        try:
-            lv_param = inst.get_Parameter(BuiltInParameter.FAMILY_LEVEL_PARAM)
-        except Exception:
-            pass
-        if lv_param is None:
-            try:
-                lv_param = inst.get_Parameter(
-                    BuiltInParameter.INSTANCE_REFERENCE_LEVEL_PARAM
-                )
-            except Exception:
-                pass
-        if lv_param is not None:
-            try:
-                if lv_param.AsElementId() != target_level.Id:
-                    continue
-            except Exception:
-                continue
-        if existing_phase is not None:
-            try:
-                ph_param = inst.get_Parameter(BuiltInParameter.PHASE_CREATED)
-                if ph_param is not None:
-                    if ph_param.AsElementId() != existing_phase.Id:
-                        continue
-            except Exception:
-                pass
-        doc.Delete(inst.Id)
-        deleted_count += 1
-    except Exception:
-        pass
-
-doc.Regenerate()
-
-activated = set()
-for code in TYPE_MAP_NORM:
-    resolved, _ = resolve_mapping(code)
-    if resolved is None:
-        continue
-    symbol, fname, tname = resolved
-    key = (fname, tname)
-    try:
-        if not symbol.IsActive and key not in activated:
-            symbol.Activate()
-            activated.add(key)
-    except Exception:
-        pass
-
-doc.Regenerate()
-
-
 placed = []
 skipped = []
 wall_placed = []
 orientation_report = []
 used_fallback = []
 
-for item in gondolas:
-    try:
-        code = normalize_lookup_key(item.get("code", ""))
-        if code not in TYPE_MAP_NORM:
-            skipped.append("UNKNOWN CODE: {}".format(code))
-            continue
+if not gondolas:
+    skipped.append(
+        "JSON is empty (0 gondolas). Nothing was placed or deleted. "
+        "Re-run Gondola_OrientationDetector.py {} on the Existing "
+        "Conditions DXF, then run this Dynamo script again.".format(SCRIPT_VERSION)
+    )
+else:
+    t = Transaction(doc, "Place Existing Conditions Gondolas")
+    t.Start()
 
-        resolved, fallback = resolve_mapping(code)
+    all_instances = list(
+        FilteredElementCollector(doc).OfClass(FamilyInstance).ToElements()
+    )
+    for inst in all_instances:
+        try:
+            family_name = get_instance_family_name(inst)
+            if family_name not in MANAGED_FAMILIES:
+                continue
+            lv_param = None
+            try:
+                lv_param = inst.get_Parameter(BuiltInParameter.FAMILY_LEVEL_PARAM)
+            except Exception:
+                pass
+            if lv_param is None:
+                try:
+                    lv_param = inst.get_Parameter(
+                        BuiltInParameter.INSTANCE_REFERENCE_LEVEL_PARAM
+                    )
+                except Exception:
+                    pass
+            if lv_param is not None:
+                try:
+                    if lv_param.AsElementId() != target_level.Id:
+                        continue
+                except Exception:
+                    continue
+            if existing_phase is not None:
+                try:
+                    ph_param = inst.get_Parameter(BuiltInParameter.PHASE_CREATED)
+                    if ph_param is not None:
+                        if ph_param.AsElementId() != existing_phase.Id:
+                            continue
+                except Exception:
+                    pass
+            doc.Delete(inst.Id)
+            deleted_count += 1
+        except Exception:
+            pass
+
+    doc.Regenerate()
+
+    activated = set()
+    for code in TYPE_MAP_NORM:
+        resolved, _ = resolve_mapping(code)
         if resolved is None:
-            fname, tname = TYPE_MAP_NORM[code]
-            skipped.append(
-                "MISSING TYPE: {} → {} / {}".format(code, fname, tname)
-            )
             continue
-
         symbol, fname, tname = resolved
-        if fallback:
-            used_fallback.append(
-                "{} placed as {} / {}".format(code, fname, tname)
-            )
+        key = (fname, tname)
+        try:
+            if not symbol.IsActive and key not in activated:
+                symbol.Activate()
+                activated.add(key)
+        except Exception:
+            pass
 
-        x_mm = float(item.get("x", 0))
-        y_mm = float(item.get("y", 0))
-        x_local_ft = x_mm * MM_TO_FT
-        y_local_ft = y_mm * MM_TO_FT
+    doc.Regenerate()
 
-        if APPLY_CAD_ROTATION:
-            cos_a = math.cos(cad_rotation_rad)
-            sin_a = math.sin(cad_rotation_rad)
-            x_rot = x_local_ft * cos_a - y_local_ft * sin_a
-            y_rot = x_local_ft * sin_a + y_local_ft * cos_a
-        else:
-            x_rot = x_local_ft
-            y_rot = y_local_ft
+    for item in gondolas:
+        try:
+            code = normalize_lookup_key(item.get("code", ""))
+            if code not in TYPE_MAP_NORM:
+                skipped.append("UNKNOWN CODE: {}".format(code))
+                continue
 
-        if APPLY_CAD_TRANSLATION:
-            x_ft = x_rot + cad_offset_x
-            y_ft = y_rot + cad_offset_y
-        else:
-            x_ft = x_rot
-            y_ft = y_rot
+            resolved, fallback = resolve_mapping(code)
+            if resolved is None:
+                fname, tname = TYPE_MAP_NORM[code]
+                skipped.append(
+                    "MISSING TYPE: {} → {} / {}".format(code, fname, tname)
+                )
+                continue
 
-        z_ft = target_level.Elevation
-        point = XYZ(x_ft, y_ft, z_ft)
+            symbol, fname, tname = resolved
+            if fallback:
+                used_fallback.append(
+                    "{} placed as {} / {}".format(code, fname, tname)
+                )
 
-        instance = doc.Create.NewFamilyInstance(
-            point,
-            symbol,
-            target_level,
-            StructuralType.NonStructural,
-        )
+            x_mm = float(item.get("x", 0))
+            y_mm = float(item.get("y", 0))
+            x_local_ft = x_mm * MM_TO_FT
+            y_local_ft = y_mm * MM_TO_FT
 
-        if existing_phase is not None:
-            try:
-                p_created = instance.get_Parameter(BuiltInParameter.PHASE_CREATED)
-                if p_created is not None and not p_created.IsReadOnly:
-                    p_created.Set(existing_phase.Id)
-            except Exception:
-                pass
+            if APPLY_CAD_ROTATION:
+                cos_a = math.cos(cad_rotation_rad)
+                sin_a = math.sin(cad_rotation_rad)
+                x_rot = x_local_ft * cos_a - y_local_ft * sin_a
+                y_rot = x_local_ft * sin_a + y_local_ft * cos_a
+            else:
+                x_rot = x_local_ft
+                y_rot = y_local_ft
 
-        if target_view is not None:
-            try:
-                target_view.SetElementOverrides(instance.Id, color_override)
-            except Exception:
-                pass
+            if APPLY_CAD_TRANSLATION:
+                x_ft = x_rot + cad_offset_x
+                y_ft = y_rot + cad_offset_y
+            else:
+                x_ft = x_rot
+                y_ft = y_rot
 
-        orientation, angle_deg, angle_source = get_orientation(item)
-        if APPLY_CAD_ROTATION and angle_deg is not None:
-            angle_deg = normalize_angle(
-                angle_deg + math.degrees(cad_rotation_rad)
-            )
+            z_ft = target_level.Elevation
+            point = XYZ(x_ft, y_ft, z_ft)
 
-        if angle_deg is not None and abs(angle_deg) > 0.0001:
-            axis = Line.CreateBound(
+            instance = doc.Create.NewFamilyInstance(
                 point,
-                XYZ(point.X, point.Y, point.Z + 1.0),
-            )
-            ElementTransformUtils.RotateElement(
-                doc,
-                instance.Id,
-                axis,
-                math.radians(angle_deg),
+                symbol,
+                target_level,
+                StructuralType.NonStructural,
             )
 
-        placed.append(
-            "{:<24} @ ({:>9.0f}, {:>9.0f}) mm angle={:>8.3f}° {}".format(
-                code,
-                x_mm,
-                y_mm,
-                angle_deg if angle_deg is not None else 0.0,
-                angle_source,
-            )
-        )
-        orientation_report.append(
-            "{} | orientation={} | angle={:.3f}° | source={}".format(
-                code,
-                orientation,
-                angle_deg if angle_deg is not None else 0.0,
-                angle_source,
-            )
-        )
+            if existing_phase is not None:
+                try:
+                    p_created = instance.get_Parameter(BuiltInParameter.PHASE_CREATED)
+                    if p_created is not None and not p_created.IsReadOnly:
+                        p_created.Set(existing_phase.Id)
+                except Exception:
+                    pass
 
-        if fname in ("Wall_Gondola", "Wall_Gondola_High_Bay"):
-            wall_placed.append(
-                "{:<24} @ ({:>9.0f}, {:>9.0f}) mm angle={:>8.3f}° id={}".format(
+            if target_view is not None:
+                try:
+                    target_view.SetElementOverrides(instance.Id, color_override)
+                except Exception:
+                    pass
+
+            orientation, angle_deg, angle_source = get_orientation(item)
+            if APPLY_CAD_ROTATION and angle_deg is not None:
+                angle_deg = normalize_angle(
+                    angle_deg + math.degrees(cad_rotation_rad)
+                )
+
+            if angle_deg is not None and abs(angle_deg) > 0.0001:
+                axis = Line.CreateBound(
+                    point,
+                    XYZ(point.X, point.Y, point.Z + 1.0),
+                )
+                ElementTransformUtils.RotateElement(
+                    doc,
+                    instance.Id,
+                    axis,
+                    math.radians(angle_deg),
+                )
+
+            placed.append(
+                "{:<24} @ ({:>9.0f}, {:>9.0f}) mm angle={:>8.3f}° {}".format(
                     code,
                     x_mm,
                     y_mm,
                     angle_deg if angle_deg is not None else 0.0,
-                    safe_element_id_value(instance.Id),
+                    angle_source,
                 )
             )
-    except Exception as ex:
-        skipped.append("ERROR {} :: {}".format(item.get("code", "?"), str(ex)))
+            orientation_report.append(
+                "{} | orientation={} | angle={:.3f}° | source={}".format(
+                    code,
+                    orientation,
+                    angle_deg if angle_deg is not None else 0.0,
+                    angle_source,
+                )
+            )
 
-t.Commit()
+            if fname in ("Wall_Gondola", "Wall_Gondola_High_Bay"):
+                wall_placed.append(
+                    "{:<24} @ ({:>9.0f}, {:>9.0f}) mm angle={:>8.3f}° id={}".format(
+                        code,
+                        x_mm,
+                        y_mm,
+                        angle_deg if angle_deg is not None else 0.0,
+                        safe_element_id_value(instance.Id),
+                    )
+                )
+        except Exception as ex:
+            skipped.append("ERROR {} :: {}".format(item.get("code", "?"), str(ex)))
+
+    t.Commit()
 
 
 sep = "=" * 75
@@ -1121,6 +1150,11 @@ lines = [
     " EXISTING CONDITIONS — GONDOLA PLACEMENT",
     sep,
     "",
+    "Script version         : {}".format(SCRIPT_VERSION),
+    "JSON path              : {}".format(JSON_PATH),
+    "JSON file size         : {} bytes".format(json_size),
+    "JSON keys              : {}".format(json_keys),
+    "JSON reported total    : {}".format(json_reported_total),
     "Total JSON items       : {}".format(len(gondolas)),
     "Placed                 : {}".format(len(placed)),
     "Skipped                : {}".format(len(skipped)),

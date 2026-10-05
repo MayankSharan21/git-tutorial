@@ -14,13 +14,18 @@ from gondola_lib import (
     classify_revit_name,
     expand_raw_labels,
     get_orientation,
+    has_classified_gondola,
     identify_text,
+    is_layout_block,
     is_noise_label,
     is_proposed_scope,
+    keep_existing_source_labels,
+    load_gondola_items,
     match_size_type,
     merge_nearby_phrases,
     normalize_line_angle,
     pick_json_angle,
+    should_scan_leftover,
     snap_line_angle,
     strip_mtext_codes,
     tracing_to_revit_angle,
@@ -128,13 +133,88 @@ class ExistingOnlyScopeTests(unittest.TestCase):
             "1-0 EXISTING CONDITIONS - GROUND",
         )
 
-    def test_drops_proposed_layer_even_without_existing_tag(self):
+    def test_keeps_proposed_layer_when_it_is_the_only_source(self):
+        # Existing Conditions exports often put the real store text on a
+        # layer called PROPOSED. Dropping that set wrote JSON with 0 items.
         raw = [
             {"text": "15FMCA", "x": 0, "y": 0, "rotation": 0, "layer": "PROPOSED"},
         ]
         gondolas, diag = build_gondolas(raw)
-        self.assertEqual(gondolas, [])
+        self.assertEqual(len(gondolas), 1)
+        self.assertEqual(gondolas[0]["code"], "15FMCA")
+        self.assertEqual(diag["dropped_proposed_layer"], 0)
+
+    def test_drops_proposed_layer_when_existing_labels_remain(self):
+        raw = [
+            {"text": "15FMCA", "x": 0, "y": 0, "rotation": 0, "layer": "EXISTING"},
+            {"text": "21FMCS", "x": 5000, "y": 0, "rotation": 0, "layer": "PROPOSED"},
+        ]
+        gondolas, diag = build_gondolas(raw)
+        codes = [item["code"] for item in gondolas]
+        self.assertEqual(codes, ["15FMCA"])
         self.assertEqual(diag["dropped_proposed_layer"], 1)
+
+    def test_keeps_selling_floor_block_when_it_is_the_only_source(self):
+        raw = [
+            {
+                "text": "15FMCA",
+                "x": 0,
+                "y": 0,
+                "rotation": 0,
+                "layer": "0",
+                "block": "1131_Marrickville_Selling floor",
+            },
+        ]
+        kept, info = keep_existing_source_labels(raw)
+        self.assertEqual(len(kept), 1)
+        self.assertEqual(info["dropped_proposed_source"], 0)
+
+    def test_drops_selling_floor_block_when_existing_block_exists(self):
+        raw = [
+            {
+                "text": "15F",
+                "x": 0,
+                "y": 200,
+                "rotation": 0,
+                "layer": "0",
+                "block": "1131_Marrickville_BLD_Existing Conditions",
+            },
+            {
+                "text": "MCA",
+                "x": 0,
+                "y": 0,
+                "rotation": 0,
+                "layer": "0",
+                "block": "1131_Marrickville_BLD_Existing Conditions",
+            },
+            {
+                "text": "15FMCA",
+                "x": 10,
+                "y": 100,
+                "rotation": 0,
+                "layer": "0",
+                "block": "1131_Marrickville_Selling floor",
+            },
+        ]
+        kept, info = keep_existing_source_labels(raw)
+        self.assertEqual(len(kept), 2)
+        self.assertGreaterEqual(info["dropped_proposed_source"], 1)
+        self.assertTrue(all("Selling" not in item.get("block", "") for item in kept))
+
+    def test_scans_leftover_when_modelspace_has_only_title_text(self):
+        title_only = [{"text": "1-0 EXISTING CONDITIONS - GROUND", "x": 0, "y": 0}]
+        self.assertFalse(has_classified_gondola(title_only))
+        self.assertTrue(should_scan_leftover(title_only))
+        self.assertFalse(should_scan_leftover([
+            {"text": "15FMCA", "x": 100, "y": 200}
+        ]))
+        self.assertFalse(is_layout_block("*U123"))
+        self.assertTrue(is_layout_block("*Model_Space"))
+
+    def test_loads_dict_or_list_json(self):
+        self.assertEqual(load_gondola_items({"gondolas": [{"code": "A"}]}), [{"code": "A"}])
+        self.assertEqual(load_gondola_items([{"code": "B"}]), [{"code": "B"}])
+        self.assertEqual(load_gondola_items({"total": 0}), [])
 
 
 class OverlayDedupTests(unittest.TestCase):

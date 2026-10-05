@@ -478,8 +478,12 @@ def layer_bucket(layer):
 
 def filter_proposed_layers(raw_labels, existing_only=True):
     """
-    Tracing is Existing-only. Proposed / overlay layers are dropped.
-    Untagged layers are kept so a pure existing DXF still works.
+    Tracing is Existing-only. Proposed / overlay layers are dropped
+    when other labels remain. Untagged layers are kept.
+
+    If every label sits on a proposed-named layer, keep them. Existing
+    Conditions exports often put the real store text on a layer called
+    PROPOSED / SELLING FLOOR. Dropping that set writes an empty JSON.
     """
     buckets = defaultdict(list)
     for label in raw_labels:
@@ -493,6 +497,11 @@ def filter_proposed_layers(raw_labels, existing_only=True):
 
     if buckets["proposed"]:
         kept = buckets["existing"] + buckets["unknown"]
+        if not kept:
+            return list(raw_labels), {
+                "dropped_proposed_layer": 0,
+                "kept_existing_layer": len(raw_labels),
+            }
         return kept, {
             "dropped_proposed_layer": len(buckets["proposed"]),
             "kept_existing_layer": len(kept),
@@ -501,6 +510,100 @@ def filter_proposed_layers(raw_labels, existing_only=True):
         "dropped_proposed_layer": 0,
         "kept_existing_layer": len(raw_labels),
     }
+
+
+def label_source_scope(label):
+    """Scope from the INSERT / leftover block name, then the layer."""
+    block_scope = classify_revit_name(label.get("block") or "")
+    if block_scope in ("existing", "proposed", "overlay"):
+        return block_scope
+    return classify_revit_name(label.get("layer") or "")
+
+
+def keep_existing_source_labels(labels, existing_only=True):
+    """
+    Prefer labels from existing-named INSERTs / leftover blocks.
+
+    Do not return empty just because the only XREF is named
+    Selling floor or Overlay. Those files often hold the actual
+    existing-plan codes.
+    """
+    if not existing_only or not labels:
+        return list(labels), {
+            "dropped_proposed_source": 0,
+            "kept_source": len(labels or []),
+        }
+
+    buckets = defaultdict(list)
+    for label in labels:
+        buckets[label_source_scope(label)].append(label)
+
+    existing = buckets["existing"]
+    overlay = buckets["overlay"]
+    proposed = buckets["proposed"]
+    neutral = buckets["neutral"]
+
+    if existing:
+        kept = existing + neutral
+        return kept, {
+            "dropped_proposed_source": len(proposed) + len(overlay),
+            "kept_source": len(kept),
+        }
+
+    if overlay or neutral:
+        if proposed:
+            kept = overlay + neutral
+            return kept, {
+                "dropped_proposed_source": len(proposed),
+                "kept_source": len(kept),
+            }
+        kept = overlay + neutral
+        return kept, {
+            "dropped_proposed_source": 0,
+            "kept_source": len(kept),
+        }
+
+    return list(labels), {
+        "dropped_proposed_source": 0,
+        "kept_source": len(labels),
+    }
+
+
+def has_classified_gondola(labels):
+    """True when any raw label is a SIZE, TYPE, PAIR, or FULL code."""
+    for label in labels or []:
+        if identify_text(label.get("text", "")):
+            return True
+    return False
+
+
+def should_scan_leftover(labels):
+    """Scan leftover blocks only when modelspace has no gondola codes."""
+    return not has_classified_gondola(labels)
+
+
+def is_layout_block(name):
+    text = str(name or "").strip().lower()
+    if not text:
+        return True
+    return (
+        text.startswith("*model_space")
+        or text.startswith("*paper_space")
+        or text in ("*model_space", "*paper_space")
+    )
+
+
+def load_gondola_items(data):
+    """Accept {gondolas: [...]} or a bare list from older detector runs."""
+    if isinstance(data, list):
+        return data
+    if not isinstance(data, dict):
+        return []
+    for key in ("gondolas", "items", "data"):
+        value = data.get(key)
+        if isinstance(value, list):
+            return value
+    return []
 
 
 def merge_nearby_phrases(raw_labels, dist=550.0):

@@ -27,6 +27,7 @@ The 5 Oct 2026 run placed **1526 / 1593** items and every family landed at **0°
 | 135° walls called vertical | Any angle above 65° was classified vertical |
 | `6WAY` skipped | Detector uppercased the code; TYPE_MAP key was `6Way` |
 | Deck / hotspot items skipped | Preferred Revit types were not loaded and there was no fallback |
+| Dynamo `Total JSON items : 0` | Detector skipped leftover blocks after seeing title text, and skipped the Selling-floor XREF that actually holds the store codes |
 
 ## What the new detector does
 
@@ -45,15 +46,18 @@ The 5 Oct 2026 run placed **1526 / 1593** items and every family landed at **0°
 - Falls back to loaded End_Panel types when `End_Panel_Decks` types are missing.
 - `EXISTING_ONLY = True`: refuses Proposed levels, overlay views, and the selling-floor CAD. Places only on Existing.
 - Prefers the CAD link whose name contains “Existing Conditions”.
+- If the JSON is empty, Dynamo reports the file size and keys and does **not** delete already-placed families.
 
 ## How to run
 
-1. Edit `DXF_FILE_PATH` and `OUTPUT_JSON` at the top of `Gondola_OrientationDetector.py`.
-2. `pip install ezdxf` if needed, then run the detector.
-3. Confirm the report: unmatched SIZE/TYPE lines should be near zero, and wall runs should show `NEIGHBOR_RUN` with 0° / 90° / 45° / 135° axes.
-4. Paste `Dynamo_ExistingGondolaPlacement.py` into Dynamo. Set `JSON_PATH` and `LEVEL_NAME` if this store uses different names.
-5. Leave `EXISTING_ONLY = True`. The script refuses Proposed levels, overlay views, and the selling-floor CAD link.
-6. Run once. The script deletes previously managed gondolas on that Existing level / Existing phase before placing.
+1. Replace both files. The detector banner must print `2026-10-05c-existing-restore`. If it does not, Dynamo is reading an empty or old JSON.
+2. Copy only `Gondola_OrientationDetector.py` into the Tracing folder. It is standalone — an old `gondola_lib.py` in that folder is ignored.
+3. Edit `DXF_FILE_PATH` and `OUTPUT_JSON` at the top of `Gondola_OrientationDetector.py`. Use the Existing Conditions GROUND DXF.
+4. `pip install ezdxf` if needed, then run the detector.
+5. Confirm the report: `Total gondolas` must not be 0. Wall runs should show `NEIGHBOR_RUN` with 0° / 90° / 45° / 135° axes.
+6. Paste `Dynamo_ExistingGondolaPlacement.py` into Dynamo. Set `JSON_PATH` to the same file the detector just wrote. Set `LEVEL_NAME` if this store uses different names.
+7. Leave `EXISTING_ONLY = True`. The script refuses Proposed levels, overlay views, and the selling-floor CAD link.
+8. Run once. The script deletes previously managed gondolas on that Existing level / Existing phase before placing — unless the JSON is empty, in which case it deletes nothing.
 
 ## Tests
 
