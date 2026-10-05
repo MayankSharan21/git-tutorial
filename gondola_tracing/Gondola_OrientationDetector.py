@@ -961,6 +961,21 @@ def extract_with_orientation(dxf_path):
     # PROCESS ENTITY
     # ========================================================
 
+    def add_bay_segment(x1, y1, x2, y2):
+        """
+        Keep only edges that could be a bay side. A store plan carries
+        far more hatching and detail than outlines, and the fit discards
+        the rest anyway.
+        """
+
+        length = math.hypot(x2 - x1, y2 - y1)
+
+        if length < BAY_MIN_SIDE_MM * 0.6 or length > BAY_MAX_SIDE_MM:
+            return
+
+        bay_segments.append((x1, y1, x2, y2))
+
+
     def collect_bay_segments(entity):
         """
         Keep the drawn gondola outlines, in the same coordinates as the
@@ -980,10 +995,10 @@ def extract_with_orientation(dxf_path):
                 start = entity.dxf.start
                 end = entity.dxf.end
 
-                bay_segments.append((
+                add_bay_segment(
                     float(start.x), float(start.y),
                     float(end.x), float(end.y)
-                ))
+                )
 
             elif dxftype == "LWPOLYLINE":
 
@@ -1005,10 +1020,10 @@ def extract_with_orientation(dxf_path):
                         points.append(points[0])
 
                     for i in range(len(points) - 1):
-                        bay_segments.append((
+                        add_bay_segment(
                             points[i][0], points[i][1],
                             points[i + 1][0], points[i + 1][1]
-                        ))
+                        )
 
             elif dxftype == "POLYLINE":
 
@@ -1026,10 +1041,10 @@ def extract_with_orientation(dxf_path):
                         pass
 
                     for i in range(len(points) - 1):
-                        bay_segments.append((
+                        add_bay_segment(
                             points[i][0], points[i][1],
                             points[i + 1][0], points[i + 1][1]
-                        ))
+                        )
 
             elif dxftype == "SOLID":
 
@@ -1045,7 +1060,7 @@ def extract_with_orientation(dxf_path):
                 for i in range(len(corners)):
                     a = corners[i]
                     b = corners[(i + 1) % len(corners)]
-                    bay_segments.append((a[0], a[1], b[0], b[1]))
+                    add_bay_segment(a[0], a[1], b[0], b[1])
 
         except Exception:
             pass
