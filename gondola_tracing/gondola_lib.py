@@ -421,6 +421,24 @@ def is_proposed_scope(name):
     return classify_revit_name(name) in ("proposed", "overlay")
 
 
+def compact_revit_name(name):
+    return re.sub(r"[^A-Z0-9]+", "", str(name or "").upper())
+
+
+def is_existing_conditions_view(name):
+    """True for Existing Conditions plans. Never Proposed / Overlay / selling floor."""
+    if classify_revit_name(name) != "existing":
+        return False
+    return "CONDITION" in compact_revit_name(name)
+
+
+def is_existing_ground_view(name):
+    if not is_existing_conditions_view(name):
+        return False
+    key = compact_revit_name(name)
+    return "GROUND" in key or key.endswith("G")
+
+
 def choose_existing_level_name(level_names, preferred=""):
     """Pick an Existing level. Never returns a proposed or overlay name."""
     names = [str(name) for name in level_names if name]
@@ -448,27 +466,14 @@ def existing_view_score(view_name, view_level="", preferred_level=""):
     """
     Rank floor plans for Existing-only placement.
 
-    Existing Conditions views win even when their associated level is
-    not 00-GROUND (Kmart files often host that view on another 0.000 ft
-    level). Overlay / proposed view names always score 0.
+    Only Existing Conditions views score. Proposed, selling-floor, and
+    overlay names are always 0.
     """
-    scope = classify_revit_name(view_name)
-    if scope in ("proposed", "overlay"):
+    if not is_existing_conditions_view(view_name):
         return 0
-    name = str(view_name or "").lower()
-    score = 0
-    if scope == "existing" and "condition" in name and "ground" in name:
+    score = 90
+    if is_existing_ground_view(view_name):
         score = 100
-    elif scope == "existing" and "condition" in name:
-        score = 90
-    elif scope == "existing" and "ground" in name:
-        score = 70
-    elif scope == "existing":
-        score = 50
-    elif preferred_level and str(view_level) == str(preferred_level):
-        score = 20
-    else:
-        return 0
     if preferred_level and str(view_level) == str(preferred_level):
         score += 5
     return score

@@ -17,6 +17,8 @@ from gondola_lib import (
     get_orientation,
     has_classified_gondola,
     identify_text,
+    is_existing_ground_view,
+    is_existing_conditions_view,
     is_layout_block,
     is_noise_label,
     is_proposed_scope,
@@ -101,6 +103,12 @@ class ExistingOnlyScopeTests(unittest.TestCase):
         )
         self.assertTrue(is_proposed_scope("2.0 PROPOSED SELLING FLOOR PLAN- GROUND"))
         self.assertFalse(is_proposed_scope("00-GROUND"))
+        self.assertTrue(is_existing_ground_view("1.0 EXISTING CONDITIONS - GROUND"))
+        self.assertTrue(is_existing_ground_view("1-0 EXISTING CONDITIONS - GROUND"))
+        self.assertFalse(is_existing_ground_view("1.1 EXISTING CONDITIONS - MEZZANINE"))
+        self.assertFalse(is_existing_conditions_view("2.0 PROPOSED SELLING FLOOR PLAN- GROUND"))
+        self.assertFalse(is_existing_conditions_view("5.0 OVERLAY- EXISTING & PROPOSED PLAN"))
+        self.assertFalse(is_existing_conditions_view("EXISTING GONDOLA TRACE - GROUND"))
 
     def test_never_chooses_proposed_level(self):
         levels = [

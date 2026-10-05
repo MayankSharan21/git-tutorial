@@ -1,7 +1,7 @@
 # Dynamo_ExistingGondolaPlacement
 # Revit 2025 / Dynamo CPython3 compatible
 #
-# Version 2026-10-05e-force-visible
+# Version 2026-10-05f-existing-view-only
 #
 # Places existing-condition gondolas from the JSON written by
 # Gondola_OrientationDetector.py.
@@ -49,9 +49,17 @@ from Autodesk.Revit.DB import (
     ViewFamily,
     TemporaryViewMode,
     WorksetVisibility,
+    TextNote,
+    TextNoteType,
+    ViewDetailLevel,
 )
 from Autodesk.Revit.DB.Structure import StructuralType
 from RevitServices.Persistence import DocumentManager
+
+try:
+    from RevitServices.Transactions import TransactionManager
+except Exception:
+    TransactionManager = None
 
 
 JSON_PATH = r"C:\Users\msharan\OneDrive - Kmart Australia Limited\Desktop\Stores Foundry\Tracing\json\gondola_data_Marrickville_New3.json"
@@ -62,7 +70,8 @@ MM_TO_FT = 1.0 / 304.8
 
 # Hard rule: place only on Existing. Never Proposed, selling-floor, or overlay.
 EXISTING_ONLY = True
-SCRIPT_VERSION = "2026-10-05e-force-visible"
+SCRIPT_VERSION = "2026-10-05f-existing-view-only"
+TRACE_NOTE_PREFIX = "EG:"
 
 USE_JSON_ANGLE = True
 ANGLE_SIGN = 1.0
@@ -628,6 +637,23 @@ def is_proposed_scope(name):
     return classify_revit_name(name) in ("proposed", "overlay")
 
 
+def compact_revit_name(name):
+    return re.sub(r"[^A-Z0-9]+", "", str(name or "").upper())
+
+
+def is_existing_conditions_view(name):
+    if classify_revit_name(name) != "existing":
+        return False
+    return "CONDITION" in compact_revit_name(name)
+
+
+def is_existing_ground_view(name):
+    if not is_existing_conditions_view(name):
+        return False
+    key = compact_revit_name(name)
+    return "GROUND" in key or key.endswith("G")
+
+
 def choose_existing_level_name(level_names, preferred=""):
     names = [str(name) for name in level_names if name]
     preferred_l = str(preferred or "").strip().lower()
@@ -648,23 +674,11 @@ def choose_existing_level_name(level_names, preferred=""):
 
 
 def existing_view_score(view_name, view_level="", preferred_level=""):
-    scope = classify_revit_name(view_name)
-    if scope in ("proposed", "overlay"):
+    if not is_existing_conditions_view(view_name):
         return 0
-    name = str(view_name or "").lower()
-    score = 0
-    if scope == "existing" and "condition" in name and "ground" in name:
+    score = 90
+    if is_existing_ground_view(view_name):
         score = 100
-    elif scope == "existing" and "condition" in name:
-        score = 90
-    elif scope == "existing" and "ground" in name:
-        score = 70
-    elif scope == "existing":
-        score = 50
-    elif preferred_level and str(view_level) == str(preferred_level):
-        score = 20
-    else:
-        return 0
     if preferred_level and str(view_level) == str(preferred_level):
         score += 5
     return score
@@ -684,11 +698,9 @@ def choose_existing_view_name(views, level_name=""):
 def choose_existing_placement(views, level_names, preferred_level="", preferred_view=""):
     views = [(str(v), str(l)) for v, l in views if v]
     if preferred_view:
-        preferred_l = str(preferred_view).strip().lower()
         for view_name, view_level in views:
-            if view_name.strip().lower() == preferred_l:
-                if classify_revit_name(view_name) not in ("proposed", "overlay"):
-                    return view_name, view_level
+            if names_match(view_name, preferred_view) and is_existing_conditions_view(view_name):
+                return view_name, view_level
     view_name = choose_existing_view_name(views, preferred_level)
     if view_name:
         for name, level in views:
@@ -920,12 +932,12 @@ chosen_level_name = None
 
 if (
     active_view is not None
-    and classify_revit_name(getattr(active_view, "Name", "")) == "existing"
+    and is_existing_ground_view(getattr(active_view, "Name", ""))
     and getattr(active_view, "GenLevel", None) is not None
 ):
     chosen_view_name = str(active_view.Name)
     chosen_level_name = str(active_view.GenLevel.Name)
-    placement_reason = "active Existing view"
+    placement_reason = "active Existing Conditions view"
 else:
     chosen_view_name, chosen_level_name = choose_existing_placement(
         view_records,
@@ -933,10 +945,7 @@ else:
         LEVEL_NAME,
         VIEW_NAME,
     )
-    if chosen_view_name:
-        placement_reason = "Existing Conditions view"
-    else:
-        placement_reason = "Existing level fallback"
+    placement_reason = "Existing Conditions view"
 
 target_view = view_by_name.get(chosen_view_name) if chosen_view_name else None
 if target_view is None and chosen_view_name and active_view is not None:
@@ -953,16 +962,15 @@ if target_view is not None and getattr(target_view, "GenLevel", None) is not Non
 elif chosen_level_name:
     target_level = level_map.get(chosen_level_name)
 
-if target_level is None:
-    fallback_name = choose_existing_level_name(level_map.keys(), LEVEL_NAME)
-    target_level = level_map.get(fallback_name) if fallback_name else None
+if target_view is not None and not is_existing_conditions_view(target_view.Name):
+    target_view = None
 
-if target_level is None:
+if target_view is None:
     raise Exception(
-        "No Existing Conditions view/level found.\n"
+        "Existing Conditions view was not found. "
+        "Tracing will not use Proposed, Overlay, or selling-floor views.\n"
         "Open '1.0 EXISTING CONDITIONS - GROUND' and run again.\n\n"
-        "Available levels:\n{}\n\nAvailable views:\n{}".format(
-            "\n".join("  " + name for name in sorted(level_map.keys())),
+        "Available views:\n{}".format(
             "\n".join(
                 "  {}  (level {})".format(v, l)
                 for v, l in sorted(view_records)
@@ -970,17 +978,14 @@ if target_level is None:
         )
     )
 
-if target_view is not None and EXISTING_ONLY and is_proposed_scope(target_view.Name):
-    target_view = None
+if target_level is None:
+    target_level = target_view.GenLevel
 
-if (
-    EXISTING_ONLY
-    and is_proposed_scope(target_level.Name)
-    and (target_view is None or classify_revit_name(target_view.Name) != "existing")
-):
+if target_level is None:
     raise Exception(
-        "Refusing to place on '{}'. Existing-only tracing is enabled.\n"
-        "Open the Existing Conditions view and run again.".format(target_level.Name)
+        "Existing Conditions view '{}' has no associated level.".format(
+            target_view.Name
+        )
     )
 
 view_listing = [
@@ -1005,11 +1010,19 @@ try:
     color_override.SetProjectionLineColor(BLUE)
 except Exception:
     pass
-try:
-    color_override.SetSurfaceForegroundPatternColor(BLUE)
-    color_override.SetSurfaceForegroundPatternVisible(True)
-except Exception:
-    pass
+    try:
+        color_override.SetSurfaceForegroundPatternColor(BLUE)
+        color_override.SetSurfaceForegroundPatternVisible(True)
+    except Exception:
+        pass
+    try:
+        color_override.SetProjectionLineWeight(8)
+        color_override.SetCutLineColor(BLUE)
+        color_override.SetCutLineWeight(8)
+        color_override.SetHalftone(False)
+        color_override.SetSurfaceTransparency(0)
+    except Exception:
+        pass
 
 all_phases = list(FilteredElementCollector(doc).OfClass(Phase))
 existing_phase = None
@@ -1117,31 +1130,37 @@ def prepare_view_for_gondolas(view, notes):
     except Exception:
         pass
 
-
-def find_or_create_trace_view(level):
-    wanted = "EXISTING GONDOLA TRACE - GROUND"
-    for view in FilteredElementCollector(doc).OfClass(ViewPlan):
-        try:
-            if str(view.Name).strip().upper() == wanted:
-                return view, False
-        except Exception:
-            pass
-    vft = None
-    for vt in FilteredElementCollector(doc).OfClass(ViewFamilyType):
-        try:
-            if vt.ViewFamily == ViewFamily.FloorPlan:
-                vft = vt
-                break
-        except Exception:
-            pass
-    if vft is None or level is None:
-        return None, False
-    view = ViewPlan.Create(doc, vft.Id, level.Id)
     try:
-        view.Name = wanted
+        view.DetailLevel = ViewDetailLevel.Fine
     except Exception:
         pass
-    return view, True
+
+    removed_filters = 0
+    try:
+        for fid in list(view.GetFilters()):
+            try:
+                view.SetFilterVisibility(fid, True)
+            except Exception:
+                pass
+            try:
+                view.RemoveFilter(fid)
+                removed_filters += 1
+            except Exception:
+                pass
+        if removed_filters:
+            notes.append("Removed {} view filters".format(removed_filters))
+    except Exception as ex:
+        notes.append("Could not clear view filters: {}".format(ex))
+
+    try:
+        from Autodesk.Revit.DB import FilteredWorksetCollector, WorksetKind
+        for ws in FilteredWorksetCollector(doc).OfKind(WorksetKind.UserWorkset):
+            try:
+                view.SetWorksetVisibility(ws.Id, WorksetVisibility.Visible)
+            except Exception:
+                pass
+    except Exception:
+        pass
 
 
 view_phase = get_view_phase(target_view)
@@ -1151,6 +1170,7 @@ if view_phase is not None:
     phase_info = "{} (from view '{}')".format(view_phase.Name, target_view.Name)
 visibility_notes = []
 trace_view = None
+notes_written = 0
 
 
 # ---------------------------------------------------------------------------
@@ -1184,22 +1204,33 @@ if not gondolas:
         "Conditions DXF, then run this Dynamo script again.".format(SCRIPT_VERSION)
     )
 else:
+    if TransactionManager is not None:
+        try:
+            TransactionManager.Instance.ForceCloseTransaction()
+        except Exception:
+            pass
+
     t = Transaction(doc, "Place Existing Conditions Gondolas")
     t.Start()
 
     prepare_view_for_gondolas(target_view, visibility_notes)
-    if target_view is not None:
-        visibility_notes.append("Prepared view '{}'".format(target_view.Name))
+    visibility_notes.append("Prepared Existing view '{}'".format(target_view.Name))
 
-    trace_view, created_trace = find_or_create_trace_view(target_level)
-    if trace_view is not None:
-        prepare_view_for_gondolas(trace_view, visibility_notes)
-        visibility_notes.append(
-            "{} view '{}'".format(
-                "Created" if created_trace else "Reused",
-                trace_view.Name,
-            )
-        )
+    text_type = None
+    try:
+        text_type = FilteredElementCollector(doc).OfClass(TextNoteType).FirstElement()
+    except Exception:
+        text_type = None
+
+    try:
+        for note in FilteredElementCollector(doc, target_view.Id).OfClass(TextNote):
+            try:
+                if str(note.Text or "").startswith(TRACE_NOTE_PREFIX):
+                    doc.Delete(note.Id)
+            except Exception:
+                pass
+    except Exception:
+        pass
 
     all_instances = list(
         FilteredElementCollector(doc).OfClass(FamilyInstance).ToElements()
@@ -1256,7 +1287,7 @@ else:
     doc.Regenerate()
 
     placed_ids = []
-    display_views = [v for v in (target_view, trace_view) if v is not None]
+    display_views = [target_view]
 
     for item in gondolas:
         try:
@@ -1343,6 +1374,19 @@ else:
 
             placed_ids.append(instance.Id)
 
+            if text_type is not None:
+                try:
+                    TextNote.Create(
+                        doc,
+                        target_view.Id,
+                        point,
+                        TRACE_NOTE_PREFIX + code,
+                        text_type.Id,
+                    )
+                    notes_written += 1
+                except Exception:
+                    pass
+
             orientation, angle_deg, angle_source = get_orientation(item)
             if APPLY_CAD_ROTATION and angle_deg is not None:
                 angle_deg = normalize_angle(
@@ -1394,7 +1438,7 @@ else:
 
     t.Commit()
 
-    show_view = target_view if target_view is not None else trace_view
+    show_view = target_view
     if uidoc is not None and show_view is not None:
         try:
             uidoc.ActiveView = show_view
@@ -1456,8 +1500,7 @@ if visibility_notes:
     lines.extend(["  " + row for row in visibility_notes])
 else:
     lines.append("  (no view prepared)")
-if trace_view is not None:
-    lines.append("  Trace view           : {}".format(trace_view.Name))
+lines.append("  Trace tags on Existing view : {}".format(notes_written))
 lines.extend([
     "",
     "CAD TRANSFORM",
