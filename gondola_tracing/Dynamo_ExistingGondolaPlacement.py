@@ -1,7 +1,7 @@
 # Dynamo_ExistingGondolaPlacement
 # Revit 2025 / Dynamo CPython3 compatible
 #
-# Version 2026-10-05p-bay-fit
+# Version 2026-10-05r-cad-axis
 # Original File2 placement (CAD offset always on). Only orientation
 # reading and Existing-view lock are changed.
 #
@@ -77,7 +77,7 @@ JSON_PATH = r"C:\Users\msharan\OneDrive - Kmart Australia Limited\Desktop\Stores
 
 LEVEL_NAME = "00-GROUND"
 VIEW_NAME = "1.0 EXISTING CONDITIONS - GROUND"
-SCRIPT_VERSION = "2026-10-05p-bay-fit"
+SCRIPT_VERSION = "2026-10-05r-cad-axis"
 
 # Partial CAD import name.
 # Leave "" to automatically use the first suitable CAD import.
@@ -872,18 +872,29 @@ def get_bay_dims_ft(g):
     """
     Drawn bay length and depth in feet, long side first, or None.
 
-    The detector writes bay_length and bay_depth in mm when it managed
-    to fit the gondola rectangle in the CAD.
+    The detector writes bay_length and bay_depth in mm from the gondola
+    it fitted in the CAD. A run drawn as one rectangle only gives the
+    depth, which is still enough to tell the right quarter turn from
+    the wrong one, so the length comes back as None in that case.
     """
 
-    try:
-        length = float(g.get("bay_length"))
-        depth = float(g.get("bay_depth"))
-    except Exception:
+    def _mm(key):
+
+        try:
+            value = float(g.get(key))
+        except Exception:
+            return None
+
+        return value if value > 0.0 else None
+
+    length = _mm("bay_length")
+    depth = _mm("bay_depth")
+
+    if depth is None:
         return None
 
-    if length <= 0.0 or depth <= 0.0:
-        return None
+    if length is None:
+        return (None, depth * MM_TO_FT)
 
     if depth > length:
         length, depth = depth, length
@@ -928,8 +939,14 @@ def bay_alignment_delta(width, depth, bay_axis, bay_dims=None):
 
     body_axis = 0.0 if width >= depth else 90.0
 
+    bay_length = (
+        bay_dims[0]
+        if bay_dims[0] is not None
+        else body_long
+    )
+
     want_x, want_y = plan_extent(
-        bay_dims[0],
+        bay_length,
         bay_dims[1],
         bay_axis
     )
@@ -966,7 +983,7 @@ def footprint_fit_error_mm(width, depth, bay_axis, bay_dims):
     How far a placed footprint's extents miss the drawn bay, in mm.
     """
 
-    if not bay_dims:
+    if not bay_dims or bay_dims[0] is None:
         return None
 
     want_x, want_y = plan_extent(
@@ -2156,7 +2173,9 @@ for g in gondolas:
             )
         ).strip()
 
-        if source == "CAD_RECTANGLE":
+        from_cad = source.startswith("CAD_")
+
+        if from_cad:
             on_cad_bay += 1
 
         if align_note:
@@ -2165,7 +2184,7 @@ for g in gondolas:
                 "{} | {}{}".format(
                     code,
                     align_note,
-                    " [CAD bay]" if source == "CAD_RECTANGLE" else ""
+                    " [{}]".format(source) if from_cad else ""
                 )
             )
 
@@ -2348,7 +2367,7 @@ lines = [
         len(placed)
     ),
 
-    "  On a measured CAD bay: {} of {}".format(
+    "  Angle read from CAD  : {} of {}".format(
         on_cad_bay,
         len(placed)
     ),

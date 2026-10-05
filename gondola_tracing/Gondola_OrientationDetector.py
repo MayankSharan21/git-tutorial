@@ -1,13 +1,15 @@
 # Gondola_OrientationDetector.py
 #
 # Original File1 collector (the run that filled most bays).
-# Version 2026-10-05p-bay-fit
+# Version 2026-10-05r-cad-axis
 #
 # Collect is unchanged: leftover named blocks + modelspace TEXT.
 # Position and orientation are corrected after collect:
 #   SIZE+TYPE paired mutual-nearest, family XY = bay centre, then
-#   each bay is snapped onto the gondola rectangle drawn in the CAD.
-#   Neighbour-run voting only fills in bays with no rectangle.
+#   each bay is read from the gondola drawn in the CAD - nested
+#   blocks exploded, runs drawn as one outline handled, and the
+#   block INSERT used when labels and outlines are in different
+#   spaces. Neighbour-run voting only fills in what is left.
 #
 # Purpose:
 #   1. Read gondola labels from a DXF file.
@@ -74,7 +76,7 @@ except Exception:
 DXF_FILE_PATH = r"C:\Users\msharan\OneDrive - Kmart Australia Limited\Desktop\Stores Foundry\PPT , Requirements, Demo videos, Pics\1131 Marrickville-Existing plan trace exercise_2 - Floor Plan - 1-0 EXISTING CONDITIONS - GROUND.dxf"
 
 OUTPUT_JSON = r"C:\Users\msharan\OneDrive - Kmart Australia Limited\Desktop\Stores Foundry\Tracing\json\gondola_data_Marrickville_New4.json"
-SCRIPT_VERSION = "2026-10-05p-bay-fit"
+SCRIPT_VERSION = "2026-10-05r-cad-axis"
 
 
 # ============================================================
@@ -664,6 +666,15 @@ BAY_MIN_SIDE_MM = 250.0
 BAY_MAX_SIDE_MM = 4200.0
 BAY_SEARCH_MM = 1600.0
 
+# A run of bays is often drawn as one long rectangle, and a wall is
+# good evidence of direction too, so long edges are kept. Only sheet
+# borders and grid lines are longer than this.
+BAY_EDGE_MAX_MM = 40000.0
+
+# Below this the pair of edges found is more likely a shelf line than
+# the sides of the bay, so the axis is trusted but the centre is not.
+BAY_MIN_CENTRE_MM = 450.0
+
 
 def segment_length(seg):
     return math.sqrt(
@@ -693,33 +704,99 @@ def line_angle_delta(a, b):
     return delta
 
 
+def point_segment_distance(point, seg):
+
+    """
+    Distance from a point to a segment, not to its midpoint.
+
+    A run of bays drawn as one rectangle has edge midpoints metres away
+    from any one bay's label, so midpoint distance hides exactly the
+    edges that give the bay its direction.
+    """
+
+    px, py = float(point[0]), float(point[1])
+
+    x1, y1, x2, y2 = seg[0], seg[1], seg[2], seg[3]
+
+    dx = x2 - x1
+    dy = y2 - y1
+
+    span = dx * dx + dy * dy
+
+    if span <= 0.0:
+        return math.sqrt((px - x1) ** 2 + (py - y1) ** 2)
+
+    t = ((px - x1) * dx + (py - y1) * dy) / span
+
+    if t < 0.0:
+        t = 0.0
+    elif t > 1.0:
+        t = 1.0
+
+    return math.sqrt(
+        (px - (x1 + t * dx)) ** 2 +
+        (py - (y1 + t * dy)) ** 2
+    )
+
+
 class SegmentIndex(object):
 
     """
     Grid index so each label only tests nearby outline segments.
+
+    Every cell a segment passes through is stamped, not just the cell
+    holding its midpoint. A run drawn as one 12 m rectangle has to be
+    found from every bay along it.
     """
 
     def __init__(self, segments, cell=BAY_SEARCH_MM):
+
         self.cell = float(cell)
         self.cells = {}
+
         for seg in segments:
-            mid_x = (seg[0] + seg[2]) / 2.0
-            mid_y = (seg[1] + seg[3]) / 2.0
-            key = (
-                int(math.floor(mid_x / self.cell)),
-                int(math.floor(mid_y / self.cell))
-            )
-            self.cells.setdefault(key, []).append(seg)
+
+            length = segment_length(seg)
+
+            steps = int(length / (self.cell * 0.5)) + 1
+
+            if steps > 400:
+                steps = 400
+
+            keys = set()
+
+            for i in range(steps + 1):
+
+                t = float(i) / float(steps)
+
+                x = seg[0] + (seg[2] - seg[0]) * t
+                y = seg[1] + (seg[3] - seg[1]) * t
+
+                keys.add((
+                    int(math.floor(x / self.cell)),
+                    int(math.floor(y / self.cell))
+                ))
+
+            for key in keys:
+                self.cells.setdefault(key, []).append(seg)
 
     def near(self, x, y):
+
         gx = int(math.floor(float(x) / self.cell))
         gy = int(math.floor(float(y) / self.cell))
+
         out = []
+        seen = set()
+
         for dx in (-1, 0, 1):
             for dy in (-1, 0, 1):
-                out.extend(
-                    self.cells.get((gx + dx, gy + dy), ())
-                )
+                for seg in self.cells.get((gx + dx, gy + dy), ()):
+                    key = id(seg)
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    out.append(seg)
+
         return out
 
 
@@ -760,124 +837,251 @@ def _dominant_angle(segments):
     )
 
 
-def _straddling_extent(point, segments, edge_dir_deg, measure_dir_deg):
+def _straddling_extent(
+    point,
+    segments,
+    edge_dir_deg,
+    measure_dir_deg,
+    prefer="outermost"
+):
+
+    """
+    Distance from point to a parallel edge on each side.
+
+    `prefer` says what the extra parallel lines inside a gondola mean.
+    Across the bay they are shelf and kick lines, so the sides of the
+    bay are the outermost balanced pair. Along the bay they are the
+    divisions between bays, so this bay ends at the nearest pair.
+    """
+
     edge_rad = math.radians(edge_dir_deg)
     ux, uy = math.cos(edge_rad), math.sin(edge_rad)
     measure_rad = math.radians(measure_dir_deg)
     nx, ny = math.cos(measure_rad), math.sin(measure_rad)
     px, py = point
 
-    low = None
-    high = None
+    lows = []
+    highs = []
 
     for seg in segments:
+
         mid_x = (seg[0] + seg[2]) / 2.0
         mid_y = (seg[1] + seg[3]) / 2.0
+
         offset = (mid_x - px) * nx + (mid_y - py) * ny
+
         extent = abs(
             (seg[2] - seg[0]) * ux +
             (seg[3] - seg[1]) * uy
         )
+
         if extent < BAY_MIN_SIDE_MM * 0.6:
             continue
+
         centre_along = (mid_x - px) * ux + (mid_y - py) * uy
+
         if abs(centre_along) > extent / 2.0 + 200.0:
             continue
+
         if offset <= 0.0:
-            if low is None or offset > low:
-                low = offset
+            lows.append(offset)
         else:
-            if high is None or offset < high:
-                high = offset
+            highs.append(offset)
 
-    if low is None or high is None:
+    if not lows or not highs:
         return None
 
-    width = high - low
+    lows = sorted(set(lows), reverse=True)[:8]
+    highs = sorted(set(highs))[:8]
 
-    if not (BAY_MIN_SIDE_MM <= width <= BAY_MAX_SIDE_MM):
+    pairs = []
+
+    for low in lows:
+        for high in highs:
+            width = high - low
+            if BAY_MIN_SIDE_MM <= width <= BAY_MAX_SIDE_MM:
+                pairs.append((abs(low + high), width, low, high))
+
+    if not pairs:
         return None
 
-    return low, high, width
+    if prefer == "narrowest":
+        pairs.sort(key=lambda p: p[1])
+        return pairs[0][2], pairs[0][3], pairs[0][1]
+
+    # The label pair straddles the bay centre line, so the sides of the
+    # bay sit either side of it at about equal distance. Shelf and kick
+    # lines are just as symmetric, so among the balanced pairs take the
+    # outermost: that is the outline. Anything reaching across the aisle
+    # is lopsided and loses.
+    best_balance = min(p[0] for p in pairs)
+
+    balanced = [p for p in pairs if p[0] <= best_balance + 150.0]
+    balanced.sort(key=lambda p: p[1], reverse=True)
+
+    return balanced[0][2], balanced[0][3], balanced[0][1]
 
 
-def bay_rect_from_segments(point, segments, search_mm=BAY_SEARCH_MM):
+def near_bay_segments(point, segments, search_mm=BAY_SEARCH_MM):
 
     """
-    Fit the drawn gondola rectangle that holds a label.
+    Drawn edges close enough to the label to belong to its bay.
+    """
 
-    Returns centre, length, depth and long-axis angle, or None.
+    near = []
+
+    for seg in segments or ():
+
+        length = segment_length(seg)
+
+        if length < BAY_MIN_SIDE_MM * 0.6 or length > BAY_EDGE_MAX_MM:
+            continue
+
+        if point_segment_distance(point, seg) > search_mm:
+            continue
+
+        near.append(seg)
+
+    return near
+
+
+def bay_fit_from_segments(point, segments, search_mm=BAY_SEARCH_MM):
+
+    """
+    Read the bay a label sits in from the gondola drawn in the CAD.
+
+    Label positions alone cannot tell a run from the aisle beside it,
+    because both have the same spacing. The drawn edges can. Three
+    tiers, best first:
+
+        RECTANGLE - long sides and both ends found. Exact centre, axis
+                    and bay size.
+        DEPTH     - long sides only, which is what a run drawn as one
+                    rectangle gives. Exact axis, exact centre across
+                    the bay, label position along it.
+        EDGE      - direction only. Nothing is moved.
+
+    Returns a dict with x, y, axis and fit, plus length / depth when
+    they were measured, or None when no edge is near the label.
     """
 
     px, py = float(point[0]), float(point[1])
 
-    near = []
-    for seg in segments or ():
-        length = segment_length(seg)
-        if length < BAY_MIN_SIDE_MM * 0.6 or length > BAY_MAX_SIDE_MM:
-            continue
-        mid_x = (seg[0] + seg[2]) / 2.0
-        mid_y = (seg[1] + seg[3]) / 2.0
-        if abs(mid_x - px) > search_mm or abs(mid_y - py) > search_mm:
-            continue
-        near.append(seg)
+    near = near_bay_segments((px, py), segments, search_mm)
 
-    if len(near) < 2:
+    if not near:
         return None
 
-    axis = _dominant_angle(near)
+    dominant = _dominant_angle(near)
 
-    if axis is None:
+    if dominant is None:
         return None
 
+    best = None
+
+    for axis in (dominant, normalize_line_angle(dominant + 90.0)):
+
+        across_dir = normalize_line_angle(axis + 90.0)
+
+        parallel = [
+            s for s in near
+            if line_angle_delta(segment_angle(s), axis) <= 12.0
+        ]
+
+        if not parallel:
+            continue
+
+        across = _straddling_extent(
+            (px, py),
+            parallel,
+            axis,
+            across_dir
+        )
+
+        if across is None:
+            continue
+
+        # The long axis is the one that measures the short way across.
+        if best is not None and across[2] >= best["across"][2]:
+            continue
+
+        perpendicular = [
+            s for s in near
+            if line_angle_delta(segment_angle(s), across_dir) <= 12.0
+        ]
+
+        along = None
+
+        if perpendicular:
+            along = _straddling_extent(
+                (px, py),
+                perpendicular,
+                across_dir,
+                axis,
+                "narrowest"
+            )
+
+        best = {
+            "axis": axis,
+            "across": across,
+            "along": along
+        }
+
+    if best is None:
+        return {
+            "x": round(px, 3),
+            "y": round(py, 3),
+            "axis": round(dominant, 3),
+            "fit": "EDGE"
+        }
+
+    axis = best["axis"]
     across_dir = normalize_line_angle(axis + 90.0)
-
-    parallel = [
-        s for s in near
-        if line_angle_delta(segment_angle(s), axis) <= 12.0
-    ]
-    perpendicular = [
-        s for s in near
-        if line_angle_delta(segment_angle(s), across_dir) <= 12.0
-    ]
-
-    if not parallel or not perpendicular:
-        return None
-
-    across = _straddling_extent((px, py), parallel, axis, across_dir)
-    along = _straddling_extent((px, py), perpendicular, across_dir, axis)
-
-    if across is None or along is None:
-        return None
 
     rad = math.radians(axis)
     ux, uy = math.cos(rad), math.sin(rad)
     across_rad = math.radians(across_dir)
     nx, ny = math.cos(across_rad), math.sin(across_rad)
 
-    across_mid = (across[0] + across[1]) / 2.0
-    along_mid = (along[0] + along[1]) / 2.0
+    cx, cy = px, py
+    depth = None
+    length = None
 
-    cx = px + nx * across_mid + ux * along_mid
-    cy = py + ny * across_mid + uy * along_mid
+    if best["across"][2] >= BAY_MIN_CENTRE_MM:
+        across_mid = (best["across"][0] + best["across"][1]) / 2.0
+        cx += nx * across_mid
+        cy += ny * across_mid
+        depth = best["across"][2]
 
-    side_along = along[2]
-    side_across = across[2]
+    along = best["along"]
 
-    if side_along >= side_across:
-        long_axis = axis
-        length, depth = side_along, side_across
+    if along is not None and along[2] >= BAY_MIN_CENTRE_MM:
+        along_mid = (along[0] + along[1]) / 2.0
+        cx += ux * along_mid
+        cy += uy * along_mid
+        length = along[2]
+
+    if depth is None:
+        fit = "EDGE"
+    elif length is None:
+        fit = "DEPTH"
     else:
-        long_axis = across_dir
-        length, depth = side_across, side_along
+        fit = "RECTANGLE"
 
-    return {
+    result = {
         "x": round(cx, 3),
         "y": round(cy, 3),
-        "length": round(length, 1),
-        "depth": round(depth, 1),
-        "axis": round(long_axis, 3),
+        "axis": round(axis, 3),
+        "fit": fit
     }
+
+    if length is not None and depth is not None:
+        result["length"] = round(max(length, depth), 1)
+        result["depth"] = round(min(length, depth), 1)
+    elif depth is not None:
+        result["depth"] = round(depth, 1)
+
+    return result
 
 
 # ============================================================
@@ -947,6 +1151,15 @@ def extract_with_orientation(dxf_path):
     full_code_gondolas = []
     bay_segments = []
 
+    # Outlines collected while walking modelspace, kept apart so they
+    # can be mapped into a block's own coordinates if that is where the
+    # labels turn out to live.
+    world_segments = []
+    block_matrices = {}
+    current_bucket = [None]
+    current_space = ["MODELSPACE"]
+    labels_by_space = {}
+
     print("Loading DXF file...")
     print(dxf_path)
     print("")
@@ -965,29 +1178,58 @@ def extract_with_orientation(dxf_path):
 
     def add_bay_segment(x1, y1, x2, y2):
         """
-        Keep only edges that could be a bay side. A store plan carries
-        far more hatching and detail than outlines, and the fit discards
-        the rest anyway.
+        Keep only edges that could be the side of a bay or a run. A
+        store plan carries far more hatching and detail than outlines,
+        and the fit discards the rest anyway.
         """
 
         length = math.hypot(x2 - x1, y2 - y1)
 
-        if length < BAY_MIN_SIDE_MM * 0.6 or length > BAY_MAX_SIDE_MM:
+        if length < BAY_MIN_SIDE_MM * 0.6 or length > BAY_EDGE_MAX_MM:
             return
 
-        bay_segments.append((x1, y1, x2, y2))
+        seg = (x1, y1, x2, y2)
+
+        bay_segments.append(seg)
+
+        if current_bucket[0] is not None:
+            current_bucket[0].append(seg)
 
 
-    def collect_bay_segments(entity):
+    def collect_bay_segments(entity, depth=0):
         """
         Keep the drawn gondola outlines, in the same coordinates as the
         labels. Store planners need the family on the rectangle, and
         label positions alone cannot tell a run from the aisle.
+
+        Nested block references are exploded, because in a real store
+        plan the gondola outlines sit inside blocks while the labels
+        sit in the space around them. V6 found no outlines at all for
+        that reason and fell back to voting.
         """
 
         try:
             dxftype = entity.dxftype()
         except Exception:
+            return
+
+        if dxftype == "INSERT":
+
+            if depth >= 4:
+                return
+
+            try:
+                children = list(entity.virtual_entities())
+            except Exception:
+                return
+
+            for child in children:
+
+                try:
+                    collect_bay_segments(child, depth + 1)
+                except Exception:
+                    pass
+
             return
 
         try:
@@ -1225,6 +1467,15 @@ def extract_with_orientation(dxf_path):
                 item
             )
 
+        else:
+            return
+
+        # Which DXF space the labels came from. The outlines may be in
+        # another one, and this says which transform to undo.
+        space = current_space[0]
+
+        labels_by_space[space] = labels_by_space.get(space, 0) + 1
+
 
     # ========================================================
     # SCAN BLOCK DEFINITIONS / XREFS
@@ -1242,6 +1493,7 @@ def extract_with_orientation(dxf_path):
         except Exception:
             continue
 
+        current_space[0] = block_def.name
 
         for entity in block_def:
 
@@ -1250,6 +1502,8 @@ def extract_with_orientation(dxf_path):
 
             except Exception:
                 pass
+
+    current_space[0] = "MODELSPACE"
 
 
     # ========================================================
@@ -1260,6 +1514,25 @@ def extract_with_orientation(dxf_path):
 
     msp = doc.modelspace()
 
+    # Modelspace outlines are in world coordinates. The labels are
+    # often inside a block instead, so remember how each block is
+    # placed: that is the exact transform between the two.
+    current_bucket[0] = world_segments
+
+    for entity in msp:
+
+        try:
+
+            if entity.dxftype() == "INSERT":
+
+                name = entity.dxf.name
+
+                if name not in block_matrices:
+                    block_matrices[name] = entity.matrix44()
+
+        except Exception:
+            pass
+
     for entity in msp:
 
         try:
@@ -1267,6 +1540,8 @@ def extract_with_orientation(dxf_path):
 
         except Exception:
             pass
+
+    current_bucket[0] = None
 
 
     # ========================================================
@@ -1492,36 +1767,208 @@ def extract_with_orientation(dxf_path):
         )
     )
 
-    index = SegmentIndex(bay_segments)
+    if bay_segments and gondolas:
 
-    snapped = 0
+        seg_x = [s[0] for s in bay_segments] + [s[2] for s in bay_segments]
+        seg_y = [s[1] for s in bay_segments] + [s[3] for s in bay_segments]
 
-    for g in gondolas:
-
-        rect = bay_rect_from_segments(
-            (g["x"], g["y"]),
-            index.near(g["x"], g["y"])
+        print(
+            "Outline X range      : {:.0f} .. {:.0f}".format(
+                min(seg_x),
+                max(seg_x)
+            )
         )
 
-        if rect is None:
-            continue
+        print(
+            "Outline Y range      : {:.0f} .. {:.0f}".format(
+                min(seg_y),
+                max(seg_y)
+            )
+        )
 
-        g["x"] = rect["x"]
-        g["y"] = rect["y"]
-        g["bay_length"] = rect["length"]
-        g["bay_depth"] = rect["depth"]
-        g["orientation_angle"] = rect["axis"]
-        g["orientation"] = get_orientation(rect["axis"])
-        g["orientation_source"] = "CAD_RECTANGLE"
+        print(
+            "Gondola X range      : {:.0f} .. {:.0f}".format(
+                min(g["x"] for g in gondolas),
+                max(g["x"] for g in gondolas)
+            )
+        )
 
-        snapped += 1
+        print(
+            "Gondola Y range      : {:.0f} .. {:.0f}".format(
+                min(g["y"] for g in gondolas),
+                max(g["y"] for g in gondolas)
+            )
+        )
+
+    def snap_to(segments, targets, apply=True):
+        """
+        Read the bay under each target from `segments`. Returns the fit
+        tier counts and the items left with no outline near them.
+
+        With apply False nothing is written, so a candidate transform
+        can be measured before it is trusted.
+        """
+
+        index = SegmentIndex(segments)
+
+        counts = {}
+        missed = []
+
+        for item in targets:
+
+            fit = bay_fit_from_segments(
+                (item["x"], item["y"]),
+                index.near(item["x"], item["y"])
+            )
+
+            if fit is None:
+                missed.append(item)
+                continue
+
+            kind = fit.get("fit", "EDGE")
+
+            counts[kind] = counts.get(kind, 0) + 1
+
+            if not apply:
+                continue
+
+            # The axis is CAD truth in every tier, so take it and keep
+            # neighbour voting away from it.
+            item["orientation_angle"] = fit["axis"]
+            item["orientation"] = get_orientation(fit["axis"])
+            item["orientation_source"] = "CAD_" + kind
+            item["x"] = fit["x"]
+            item["y"] = fit["y"]
+
+            if "depth" in fit:
+                item["bay_depth"] = fit["depth"]
+
+            if "length" in fit:
+                item["bay_length"] = fit["length"]
+
+        return counts, missed
+
+
+    fit_counts, missed = snap_to(bay_segments, gondolas)
+
+
+    # ========================================================
+    # SAME GONDOLAS, DIFFERENT DXF SPACE
+    # ========================================================
+    #
+    # The labels are commonly inside a block while the outlines are
+    # drawn in modelspace, or the reverse. Their coordinates then look
+    # unrelated even though they describe the same floor. The block's
+    # own INSERT is the exact transform between the two, so try it
+    # rather than guessing an offset.
+
+    if missed and len(missed) > len(gondolas) / 4 and world_segments:
+
+        # Only the blocks the labels actually came from, busiest first.
+        candidates = [
+            name for name in sorted(
+                labels_by_space,
+                key=lambda n: labels_by_space[n],
+                reverse=True
+            )
+            if name in block_matrices
+        ][:3]
+
+        sample = missed[::max(1, len(missed) // 60)]
+
+        best = None
+
+        for name in candidates:
+
+            try:
+                back = block_matrices[name].copy()
+                back.inverse()
+            except Exception:
+                continue
+
+            moved = []
+
+            for seg in world_segments:
+
+                try:
+                    a = back.transform((seg[0], seg[1], 0.0))
+                    b = back.transform((seg[2], seg[3], 0.0))
+                except Exception:
+                    moved = []
+                    break
+
+                moved.append((a[0], a[1], b[0], b[1]))
+
+            if not moved:
+                continue
+
+            counts, still_missed = snap_to(moved, sample, apply=False)
+
+            found = len(sample) - len(still_missed)
+
+            if best is None or found > best["found"]:
+                best = {
+                    "name": name,
+                    "found": found,
+                    "sample": len(sample),
+                    "segments": moved
+                }
+
+        if best is not None and best["found"] > best["sample"] / 2:
+
+            print("")
+            print(
+                "Labels sit inside block '{}'. Mapping the modelspace "
+                "outlines into it.".format(
+                    best["name"]
+                )
+            )
+
+            counts, missed = snap_to(best["segments"], missed)
+
+            for key in counts:
+                fit_counts[key] = fit_counts.get(key, 0) + counts[key]
+
+    no_geometry = len(missed)
+
+    print("")
 
     print(
-        "Snapped to CAD bay   : {} of {}".format(
-            snapped,
+        "Fitted whole bay     : {}".format(
+            fit_counts.get("RECTANGLE", 0)
+        )
+    )
+
+    print(
+        "Fitted run depth     : {}".format(
+            fit_counts.get("DEPTH", 0)
+        )
+    )
+
+    print(
+        "Direction from edges : {}".format(
+            fit_counts.get("EDGE", 0)
+        )
+    )
+
+    print(
+        "No CAD outline near  : {} of {}".format(
+            no_geometry,
             len(gondolas)
         )
     )
+
+    if no_geometry > len(gondolas) / 2:
+
+        print("")
+        print("  WARNING")
+        print("  Most gondolas have no drawn outline within "
+              "{:.0f} mm.".format(BAY_SEARCH_MM))
+        print("  Compare the ranges above: if the outlines and the")
+        print("  gondolas are in different coordinate ranges, the")
+        print("  labels and the geometry are in different DXF spaces")
+        print("  and orientation falls back to neighbour voting.")
+
     print("")
 
 
@@ -1599,15 +2046,16 @@ def _tracing_to_revit_angle(orientation_angle):
 def apply_neighbor_orientations(items):
     resolved = [None] * len(items)
 
-    # A bay matched to its drawn rectangle is already exact. Never let
-    # neighbour voting move it: a run and the aisle beside it share the
-    # same 1200 mm spacing, which is what put half the V5 families 90
-    # degrees out.
+    # A bay read from the drawn outline is already exact, whichever tier
+    # it came from. Never let neighbour voting move it: a run and the
+    # aisle beside it share the same 1200 mm spacing, which is what put
+    # half the V5 and V6 families 90 degrees out.
     for i, item in enumerate(items):
-        if item.get("orientation_source") == "CAD_RECTANGLE":
+        source = str(item.get("orientation_source", ""))
+        if source.startswith("CAD_"):
             resolved[i] = (
                 normalize_line_angle(item.get("orientation_angle", 0.0)),
-                "CAD_RECTANGLE"
+                source
             )
 
     for i, target in enumerate(items):

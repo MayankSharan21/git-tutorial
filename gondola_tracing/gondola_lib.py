@@ -799,6 +799,15 @@ BAY_MIN_SIDE_MM = 250.0
 BAY_MAX_SIDE_MM = 4200.0
 BAY_SEARCH_MM = 1600.0
 
+# A run of bays is often drawn as one long rectangle, and a wall is
+# good evidence of direction too, so long edges are kept. Only sheet
+# borders and grid lines are longer than this.
+BAY_EDGE_MAX_MM = 40000.0
+
+# Below this the pair of edges found is more likely a shelf line than
+# the sides of the bay, so the axis is trusted but the centre is not.
+BAY_MIN_CENTRE_MM = 450.0
+
 
 def segment_length(seg):
     return math.hypot(seg[2] - seg[0], seg[3] - seg[1])
@@ -809,6 +818,25 @@ def segment_angle(seg):
     return normalize_line_angle(
         math.degrees(math.atan2(seg[3] - seg[1], seg[2] - seg[0]))
     )
+
+
+def point_segment_distance(point, seg):
+    """
+    Distance from a point to a segment, not to its midpoint.
+
+    A run of bays drawn as one rectangle has edge midpoints metres away
+    from any single bay's label, so midpoint distance hides exactly the
+    edges that give the bay its direction.
+    """
+    px, py = float(point[0]), float(point[1])
+    x1, y1, x2, y2 = seg[0], seg[1], seg[2], seg[3]
+    dx, dy = x2 - x1, y2 - y1
+    span = dx * dx + dy * dy
+    if span <= 0.0:
+        return math.hypot(px - x1, py - y1)
+    t = ((px - x1) * dx + (py - y1) * dy) / span
+    t = max(0.0, min(1.0, t))
+    return math.hypot(px - (x1 + t * dx), py - (y1 + t * dy))
 
 
 def _dominant_angle(segments):
@@ -838,13 +866,20 @@ def _dominant_angle(segments):
     return normalize_line_angle(math.degrees(math.atan2(y, x)) / 2.0)
 
 
-def _straddling_extent(point, segments, edge_dir_deg, measure_dir_deg):
+def _straddling_extent(
+    point, segments, edge_dir_deg, measure_dir_deg, prefer="outermost"
+):
     """
-    Distance from point to the nearest parallel edge on each side.
+    Distance from point to a parallel edge on each side.
 
     `edge_dir_deg` is the direction the edges run. Offsets are measured
     along `measure_dir_deg`, so the caller controls the sign and the
     two results can be combined without a hidden convention.
+
+    `prefer` says what the extra parallel lines inside a gondola mean.
+    Across the bay they are shelf and kick lines, so the sides of the
+    bay are the outermost balanced pair. Along the bay they are the
+    divisions between bays, so this bay ends at the nearest pair.
     """
     edge_rad = math.radians(edge_dir_deg)
     ux, uy = math.cos(edge_rad), math.sin(edge_rad)
@@ -852,8 +887,8 @@ def _straddling_extent(point, segments, edge_dir_deg, measure_dir_deg):
     nx, ny = math.cos(measure_rad), math.sin(measure_rad)
     px, py = point
 
-    low = None
-    high = None
+    lows = []
+    highs = []
     for seg in segments:
         mid_x = (seg[0] + seg[2]) / 2.0
         mid_y = (seg[1] + seg[3]) / 2.0
@@ -866,92 +901,183 @@ def _straddling_extent(point, segments, edge_dir_deg, measure_dir_deg):
         if abs(centre_along) > extent / 2.0 + 200.0:
             continue
         if offset <= 0.0:
-            if low is None or offset > low:
-                low = offset
+            lows.append(offset)
         else:
-            if high is None or offset < high:
-                high = offset
-    if low is None or high is None:
+            highs.append(offset)
+    if not lows or not highs:
         return None
-    width = high - low
-    if not (BAY_MIN_SIDE_MM <= width <= BAY_MAX_SIDE_MM):
+
+    # Nearest first, and only a handful of each: these are edges within
+    # one bay of the label.
+    lows = sorted(set(lows), reverse=True)[:8]
+    highs = sorted(set(highs))[:8]
+
+    pairs = []
+    for low in lows:
+        for high in highs:
+            width = high - low
+            if BAY_MIN_SIDE_MM <= width <= BAY_MAX_SIDE_MM:
+                pairs.append((abs(low + high), width, low, high))
+    if not pairs:
         return None
+
+    if prefer == "narrowest":
+        pairs.sort(key=lambda p: p[1])
+        _, width, low, high = pairs[0]
+        return low, high, width
+
+    # The label pair straddles the bay centre line, so the sides of the
+    # bay sit either side of it at about equal distance. Shelf and kick
+    # lines are just as symmetric, so among the balanced pairs take the
+    # outermost: that is the outline. Anything reaching across the aisle
+    # is lopsided and loses.
+    best_balance = min(p[0] for p in pairs)
+    balanced = [p for p in pairs if p[0] <= best_balance + 150.0]
+    balanced.sort(key=lambda p: p[1], reverse=True)
+
+    _, width, low, high = balanced[0]
     return low, high, width
 
 
-def bay_rect_from_segments(point, segments, search_mm=BAY_SEARCH_MM):
-    """
-    Fit the CAD bay rectangle that holds a label.
-
-    Store planners want the family to sit exactly on the drawn gondola.
-    Label positions alone cannot tell a run from the aisle beside it, so
-    read the rectangle: its centre is the bay centre and its long side
-    is the bay axis.
-
-    Returns {'x', 'y', 'length', 'depth', 'axis'} or None.
-    """
-    px, py = float(point[0]), float(point[1])
+def near_bay_segments(point, segments, search_mm=BAY_SEARCH_MM):
+    """Drawn edges close enough to the label to belong to its bay."""
     near = []
     for seg in segments or ():
         length = segment_length(seg)
-        if length < BAY_MIN_SIDE_MM * 0.6 or length > BAY_MAX_SIDE_MM:
+        if length < BAY_MIN_SIDE_MM * 0.6 or length > BAY_EDGE_MAX_MM:
             continue
-        mid_x = (seg[0] + seg[2]) / 2.0
-        mid_y = (seg[1] + seg[3]) / 2.0
-        if abs(mid_x - px) > search_mm or abs(mid_y - py) > search_mm:
+        if point_segment_distance(point, seg) > search_mm:
             continue
         near.append(seg)
-    if len(near) < 2:
+    return near
+
+
+def bay_fit_from_segments(point, segments, search_mm=BAY_SEARCH_MM):
+    """
+    Read the bay a label sits in from the gondola drawn in the CAD.
+
+    Label positions alone cannot tell a run from the aisle beside it,
+    because both have the same spacing. The drawn edges can. Three
+    tiers, best first:
+
+        RECTANGLE - long sides and both ends found. Exact centre, axis
+                    and bay size.
+        DEPTH     - long sides only, which is what a run drawn as one
+                    rectangle gives. Exact axis, exact centre across
+                    the bay, label position along it.
+        EDGE      - direction only. Nothing is moved.
+
+    Returns {'x', 'y', 'axis', 'fit'} plus 'length' / 'depth' when they
+    were measured, or None when no edge is near the label.
+    """
+    px, py = float(point[0]), float(point[1])
+    near = near_bay_segments((px, py), segments, search_mm)
+    if not near:
         return None
 
-    axis = _dominant_angle(near)
-    if axis is None:
+    dominant = _dominant_angle(near)
+    if dominant is None:
         return None
 
-    parallel = [s for s in near if angular_delta(segment_angle(s), axis) <= 12.0]
-    perpendicular = [
-        s for s in near
-        if angular_delta(segment_angle(s), normalize_line_angle(axis + 90.0)) <= 12.0
-    ]
-    if not parallel or not perpendicular:
-        return None
+    best = None
+    for axis in (dominant, normalize_line_angle(dominant + 90.0)):
+        across_dir = normalize_line_angle(axis + 90.0)
+        parallel = [
+            s for s in near if angular_delta(segment_angle(s), axis) <= 12.0
+        ]
+        if not parallel:
+            continue
+        # Long sides run along the axis; measure how far they sit across it.
+        across = _straddling_extent((px, py), parallel, axis, across_dir)
+        if across is None:
+            continue
+        # The long axis is the one that measures the short way across.
+        if best is not None and across[2] >= best["across"][2]:
+            continue
+        perpendicular = [
+            s for s in near
+            if angular_delta(segment_angle(s), across_dir) <= 12.0
+        ]
+        along = None
+        if perpendicular:
+            # Short ends run across the axis; measure how far they sit
+            # along it.
+            along = _straddling_extent(
+                (px, py), perpendicular, across_dir, axis, "narrowest"
+            )
+        best = {"axis": axis, "across": across, "along": along}
 
+    if best is None:
+        return {
+            "x": round(px, 3),
+            "y": round(py, 3),
+            "axis": round(dominant, 3),
+            "fit": "EDGE",
+        }
+
+    axis = best["axis"]
     across_dir = normalize_line_angle(axis + 90.0)
-
-    # Long sides run along the axis; measure how far they sit across it.
-    across = _straddling_extent((px, py), parallel, axis, across_dir)
-    # Short ends run across the axis; measure how far they sit along it.
-    along = _straddling_extent((px, py), perpendicular, across_dir, axis)
-    if across is None or along is None:
-        return None
-
     rad = math.radians(axis)
     ux, uy = math.cos(rad), math.sin(rad)
     across_rad = math.radians(across_dir)
     nx, ny = math.cos(across_rad), math.sin(across_rad)
 
-    across_mid = (across[0] + across[1]) / 2.0
-    along_mid = (along[0] + along[1]) / 2.0
+    cx, cy = px, py
+    depth = None
+    length = None
 
-    cx = px + nx * across_mid + ux * along_mid
-    cy = py + ny * across_mid + uy * along_mid
+    if best["across"][2] >= BAY_MIN_CENTRE_MM:
+        across_mid = (best["across"][0] + best["across"][1]) / 2.0
+        cx += nx * across_mid
+        cy += ny * across_mid
+        depth = best["across"][2]
 
-    side_along = along[2]
-    side_across = across[2]
+    along = best["along"]
+    if along is not None and along[2] >= BAY_MIN_CENTRE_MM:
+        along_mid = (along[0] + along[1]) / 2.0
+        cx += ux * along_mid
+        cy += uy * along_mid
+        length = along[2]
 
-    if side_along >= side_across:
-        long_axis = axis
-        length, depth = side_along, side_across
+    if depth is None:
+        fit = "EDGE"
+    elif length is None:
+        fit = "DEPTH"
     else:
-        long_axis = normalize_line_angle(axis + 90.0)
-        length, depth = side_across, side_along
+        fit = "RECTANGLE"
 
-    return {
+    result = {
         "x": round(cx, 3),
         "y": round(cy, 3),
-        "length": round(length, 1),
-        "depth": round(depth, 1),
-        "axis": round(long_axis, 3),
+        "axis": round(axis, 3),
+        "fit": fit,
+    }
+
+    if length is not None and depth is not None:
+        result["length"] = round(max(length, depth), 1)
+        result["depth"] = round(min(length, depth), 1)
+    elif depth is not None:
+        result["depth"] = round(depth, 1)
+
+    return result
+
+
+def bay_rect_from_segments(point, segments, search_mm=BAY_SEARCH_MM):
+    """
+    Fit the complete CAD bay rectangle holding a label.
+
+    Returns {'x', 'y', 'length', 'depth', 'axis'} or None when the ends
+    of the bay were not drawn.
+    """
+    fit = bay_fit_from_segments(point, segments, search_mm)
+    if fit is None or fit.get("fit") != "RECTANGLE":
+        return None
+    return {
+        "x": fit["x"],
+        "y": fit["y"],
+        "length": fit["length"],
+        "depth": fit["depth"],
+        "axis": fit["axis"],
     }
 
 
@@ -1033,15 +1159,29 @@ def plan_extent(length, depth, axis):
 
 
 def bay_dims_from_item(item):
-    """Drawn bay length and depth in mm, long side first, or None."""
+    """
+    Drawn bay length and depth in mm, long side first, or None.
+
+    A run drawn as one rectangle only gives the depth, which is still
+    enough to tell the right quarter turn from the wrong one, so the
+    length comes back as None in that case.
+    """
     item = item or {}
-    try:
-        length = float(item.get("bay_length"))
-        depth = float(item.get("bay_depth"))
-    except (TypeError, ValueError):
+
+    def _mm(key):
+        try:
+            value = float(item.get(key))
+        except (TypeError, ValueError):
+            return None
+        return value if value > 0.0 else None
+
+    length = _mm("bay_length")
+    depth = _mm("bay_depth")
+
+    if depth is None:
         return None
-    if length <= 0.0 or depth <= 0.0:
-        return None
+    if length is None:
+        return (None, depth)
     if depth > length:
         length, depth = depth, length
     return (length, depth)
@@ -1075,7 +1215,8 @@ def bay_alignment_delta(width, depth, bay_axis, bay_length=None, bay_depth=None)
         return delta
 
     body_axis = 0.0 if width >= depth else 90.0
-    want_x, want_y = plan_extent(dims[0], dims[1], bay_axis)
+    bay_length = dims[0] if dims[0] is not None else body_long
+    want_x, want_y = plan_extent(bay_length, dims[1], bay_axis)
 
     best, best_score = delta, None
     for candidate in (delta, delta + 90.0, delta - 90.0):
@@ -1095,7 +1236,7 @@ def footprint_fit_error(width, depth, bay_length, bay_depth, bay_axis):
     dims = bay_dims_from_item(
         {"bay_length": bay_length, "bay_depth": bay_depth}
     )
-    if dims is None:
+    if dims is None or dims[0] is None:
         return None
     try:
         width = float(width)

@@ -31,6 +31,7 @@ from gondola_lib import (
     pick_json_angle,
     bay_alignment_delta,
     bay_axis_from_item,
+    bay_fit_from_segments,
     bay_dims_from_item,
     bay_rect_from_segments,
     compatible_leftover_labels,
@@ -456,6 +457,72 @@ class BayRectangleTests(unittest.TestCase):
         )
 
 
+class BayFitTests(unittest.TestCase):
+    """How the real drawing is built, rather than one bay per rectangle."""
+
+    def test_run_drawn_as_one_rectangle_still_gives_axis_and_depth(self):
+        # Marrickville draws a whole run as a single outline. The edge
+        # midpoints are metres from any one label, which is why the V6
+        # run found nothing and fell back to voting.
+        segs = rect_segments(10000, 5000, 6000, 900, 0.0)
+        fit = bay_fit_from_segments((8800, 5120), segs)
+        self.assertIsNotNone(fit)
+        self.assertEqual(fit["fit"], "DEPTH")
+        self.assertAlmostEqual(fit["axis"], 0.0, delta=0.5)
+        self.assertAlmostEqual(fit["y"], 5000, delta=1.0)
+        # Nothing is known along the run, so the label keeps its place.
+        self.assertAlmostEqual(fit["x"], 8800, delta=1.0)
+
+    def test_vertical_run_drawn_as_one_rectangle(self):
+        segs = rect_segments(2000, 9000, 6000, 900, 90.0)
+        fit = bay_fit_from_segments((2120, 7500), segs)
+        self.assertIsNotNone(fit)
+        self.assertAlmostEqual(fit["axis"], 90.0, delta=0.5)
+        self.assertAlmostEqual(fit["x"], 2000, delta=1.0)
+
+    def test_run_with_division_lines_gives_the_whole_bay(self):
+        segs = rect_segments(10000, 5000, 6000, 900, 0.0)
+        for x in (7600, 8800, 10000, 11200, 12400):
+            segs.append((x, 4550, x, 5450))
+        fit = bay_fit_from_segments((8700, 5100), segs)
+        self.assertEqual(fit["fit"], "RECTANGLE")
+        self.assertAlmostEqual(fit["x"], 8200, delta=1.0)
+        self.assertAlmostEqual(fit["y"], 5000, delta=1.0)
+        self.assertAlmostEqual(fit["length"], 1200, delta=1.0)
+        self.assertAlmostEqual(fit["depth"], 900, delta=1.0)
+
+    def test_shelf_lines_do_not_centre_the_family_on_a_shelf(self):
+        # Gondolas are drawn with shelf and kick lines running the same
+        # way as the bay. The nearest pair of edges is then a shelf, not
+        # the sides of the bay.
+        segs = rect_segments(10000, 5000, 1200, 1000, 0.0)
+        for y in (4700, 4850, 5150, 5300):
+            segs.append((9400, y, 10600, y))
+        fit = bay_fit_from_segments((10000, 5020), segs)
+        self.assertEqual(fit["fit"], "RECTANGLE")
+        self.assertAlmostEqual(fit["y"], 5000, delta=1.0)
+        self.assertAlmostEqual(fit["depth"], 1000, delta=1.0)
+
+    def test_single_edge_gives_the_axis_only(self):
+        fit = bay_fit_from_segments((100, 300), [(0, 0, 4000, 0)])
+        self.assertIsNotNone(fit)
+        self.assertEqual(fit["fit"], "EDGE")
+        self.assertAlmostEqual(fit["axis"], 0.0, delta=0.5)
+        self.assertAlmostEqual(fit["x"], 100, delta=0.01)
+        self.assertAlmostEqual(fit["y"], 300, delta=0.01)
+
+    def test_run_across_the_aisle_does_not_turn_the_bay(self):
+        # The V5/V6 failure, with both runs drawn as single outlines.
+        segs = rect_segments(10000, 5000, 6000, 900, 0.0)
+        segs += rect_segments(10000, 7000, 6000, 900, 90.0)
+        fit = bay_fit_from_segments((8800, 5120), segs)
+        self.assertAlmostEqual(fit["axis"], 0.0, delta=0.5)
+
+    def test_no_geometry_at_all(self):
+        self.assertIsNone(bay_fit_from_segments((0, 0), []))
+        self.assertIsNone(bay_fit_from_segments((90000, 90000), [(0, 0, 1200, 0)]))
+
+
 class FootprintAlignmentTests(unittest.TestCase):
     def test_bay_axis_prefers_long_axis_field(self):
         self.assertEqual(bay_axis_from_item({"orientation_angle": 0.0}), 0.0)
@@ -512,6 +579,21 @@ class BayDimensionAlignmentTests(unittest.TestCase):
         )
         self.assertIsNone(bay_dims_from_item({"bay_length": 1200.0}))
         self.assertIsNone(bay_dims_from_item({}))
+
+    def test_depth_only_is_enough(self):
+        # A run drawn as one rectangle gives the depth and nothing else.
+        self.assertEqual(bay_dims_from_item({"bay_depth": 900.0}), (None, 900.0))
+        # Box 1200 x 900 on a bay 900 deep running along +Y.
+        self.assertEqual(
+            bay_alignment_delta(1200.0, 900.0, 90.0, None, 900.0), 90.0
+        )
+        self.assertEqual(
+            bay_alignment_delta(900.0, 1200.0, 90.0, None, 900.0), 0.0
+        )
+        # Nothing to report against without the length.
+        self.assertIsNone(
+            footprint_fit_error(1200.0, 900.0, None, 900.0, 0.0)
+        )
 
     def test_without_bay_dims_it_matches_the_long_axis_turn(self):
         self.assertEqual(bay_alignment_delta(4.0, 2.0, 90.0), 90.0)

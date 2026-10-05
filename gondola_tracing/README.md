@@ -31,6 +31,7 @@ The 5 Oct 2026 run placed **1526 / 1593** items and every family landed at **0°
 | V3 PDF: small inset families, gaps, worse than first run | Detector mixed leftover LOCAL SIZE+TYPE with XREF world coordinates, then Dynamo read an older New3 JSON |
 | V4 PDF: coverage good, families beside their bays and some runs 90° out | Position came from the SIZE label, pairing reached into the next bay at 1500 mm, and rotation about the insertion point moved each body off its bay |
 | V5 PDF: right size, 117 of 254 bays 90° out, centres ~18 pt off | Orientation came from voting on neighbouring label positions. An aisle has the same 1200 mm spacing as a run, so the vote cannot tell a run from the gap beside it |
+| V6 PDF: identical to V5 (119 of 258 bays 90° out) | The bay-rectangle fit found no geometry and fell back to voting without saying so. It needed one rectangle per bay, searched by edge *midpoint*, and never looked inside nested blocks — so a run drawn as one long outline inside a block was invisible |
 
 ## What the new detector does
 
@@ -38,7 +39,12 @@ The 5 Oct 2026 run placed **1526 / 1593** items and every family landed at **0°
 - Uses the original File1 collector: leftover named blocks + modelspace TEXT. Dynamo always adds the CAD offset. Orientation is rewritten afterwards from neighbour-run voting; DXF text rotation is ignored.
 - Pairs SIZE+TYPE mutual-nearest (800 mm, then 1500 mm, then a greedy pass). Greedy 1500 mm alone let a SIZE grab the next bay's TYPE and dropped a family in the aisle.
 - Writes the family position at the **bay centre** (midpoint of the two label lines), not at the SIZE label.
-- **Fits the drawn gondola rectangle in the CAD** around each label and takes its centre as the position, its long side as the bay axis, and its sides as `bay_length` / `bay_depth`. Those items are marked `orientation_source: CAD_RECTANGLE` and neighbour voting cannot override them. Label positions alone cannot tell a run from the aisle beside it; the drawn outline can.
+- **Reads the bay from the gondola drawn in the CAD**, because label positions alone cannot tell a run from the aisle beside it and the drawn outline can. Three tiers, best first, all of them CAD truth that neighbour voting may not override:
+  - `CAD_RECTANGLE` — long sides and both ends found. Exact centre, axis and `bay_length` / `bay_depth`.
+  - `CAD_DEPTH` — long sides only, which is what a run drawn as one long outline gives. Exact axis, exact centre across the bay, label position along it.
+  - `CAD_EDGE` — direction only. Nothing is moved.
+- To find that geometry it explodes nested blocks, measures distance to the whole edge rather than to its midpoint, keeps edges up to 40 m, and treats inner parallel lines as shelves across the bay but as bay divisions along it.
+- If the labels are in a block and the outlines in modelspace, their coordinates look unrelated. The detector uses the block's own INSERT as the exact transform between the two rather than guessing an offset, and says so when it does.
 - Dynamo measures each placed footprint and turns it onto the bay axis about the footprint centre, then centres it on the bay. Rotating about the insertion point swung bodies off their bays, because these families are not centred on their origin.
 - Matches SIZE+TYPE with mutual nearest-neighbour and a ~700 mm stack window so adjacent 1200 mm bays are not paired.
 - Infers orientation from neighbouring bay centres (1200 / 1500 / 1800 mm runs). This is what aligns the Marrickville south wall, west wall, and 45° corner.
@@ -49,7 +55,7 @@ The 5 Oct 2026 run placed **1526 / 1593** items and every family landed at **0°
 ## What the new Dynamo script does
 
 - Uses `revit_angle` / `angle` / `orientation_angle` only. Ignores text `rotation`.
-- Chooses the quarter turn whose resulting extents match `bay_length` / `bay_depth`, so a family whose bounding box is bigger than its footprint still lands along the bay. The report shows `On a measured CAD bay: N of M` and a per-item `fit=(+dx,+dy) mm`, which is where a wrong family size shows up.
+- Chooses the quarter turn whose resulting extents match `bay_length` / `bay_depth`, so a family whose bounding box is bigger than its footprint still lands along the bay. `bay_depth` on its own is enough. The report shows `Angle read from CAD: N of M` and a per-item `fit=(+dx,+dy) mm`, which is where a wrong family size shows up.
 - Looks up TYPE_MAP case-insensitively (`6WAY` works).
 - Falls back to loaded End_Panel types when `End_Panel_Decks` types are missing.
 - `EXISTING_ONLY = True`: refuses Proposed levels, overlay views, and the selling-floor CAD. Places only on Existing.
@@ -59,11 +65,11 @@ The 5 Oct 2026 run placed **1526 / 1593** items and every family landed at **0°
 
 ## How to run
 
-1. Replace **both** files. Dynamo must report `2026-10-05p-bay-fit`. Re-run the detector (leftover named blocks, mutual-nearest pairing, XY = bay centre) so it writes `gondola_data_Marrickville_New4.json`, then run Dynamo. Do not reuse New2 / New3.
+1. Replace **both** files. Dynamo must report `2026-10-05r-cad-axis`. Re-run the detector (leftover named blocks, mutual-nearest pairing, XY = bay centre) so it writes `gondola_data_Marrickville_New4.json`, then run Dynamo. Do not reuse New2 / New3.
 2. Copy only `Gondola_OrientationDetector.py` into the Tracing folder. It is standalone — an old `gondola_lib.py` in that folder is ignored.
 3. Edit `DXF_FILE_PATH` and `OUTPUT_JSON` at the top of `Gondola_OrientationDetector.py`. Use the Existing Conditions GROUND DXF.
 4. `pip install ezdxf` if needed, then run the detector.
-5. Confirm the report: `Total gondolas` must not be 0, and `Snapped to CAD bay` should cover most of them. Anything left over falls back to `NEIGHBOR_RUN` voting with 0° / 90° / 45° / 135° axes.
+5. Confirm the report: `Total gondolas` must not be 0, and `No CAD outline near` should be close to 0. Anything counted there falls back to `NEIGHBOR_RUN` voting, which is what put half the V5 / V6 bays 90° out. If that count is high, compare the printed outline and gondola coordinate ranges — different ranges mean the labels and the geometry are in different DXF spaces.
 6. Paste `Dynamo_ExistingGondolaPlacement.py` into Dynamo. Set `JSON_PATH` to the same file the detector just wrote. Set `LEVEL_NAME` if this store uses different names.
 7. Leave `EXISTING_ONLY = True`. The script refuses Proposed levels, overlay views, and the selling-floor CAD link.
 8. Run once. The script deletes previously managed gondolas on that Existing level / Existing phase before placing — unless the JSON is empty, in which case it deletes nothing.
