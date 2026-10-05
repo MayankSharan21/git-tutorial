@@ -29,11 +29,15 @@ The 5 Oct 2026 run placed **1526 / 1593** items and every family landed at **0°
 | Deck / hotspot items skipped | Preferred Revit types were not loaded and there was no fallback |
 | Dynamo `Total JSON items : 0` | Detector skipped leftover blocks after seeing title text, and skipped the Selling-floor XREF that actually holds the store codes |
 | V3 PDF: small inset families, gaps, worse than first run | Detector mixed leftover LOCAL SIZE+TYPE with XREF world coordinates, then Dynamo read an older New3 JSON |
+| V4 PDF: coverage good, families beside their bays and some runs 90° out | Position came from the SIZE label, pairing reached into the next bay at 1500 mm, and rotation about the insertion point moved each body off its bay |
 
 ## What the new detector does
 
 - Cleans MTEXT formatting and split labels (`15F` + `MCA`, `15F\PMCA`).
-- Uses the original File1 collector you sent: leftover named blocks + modelspace TEXT, 1500 mm SIZE+TYPE pairing, family XY at the SIZE label. Dynamo always adds the CAD offset. Orientation is rewritten afterwards from neighbour-run voting; DXF text rotation is ignored.
+- Uses the original File1 collector: leftover named blocks + modelspace TEXT. Dynamo always adds the CAD offset. Orientation is rewritten afterwards from neighbour-run voting; DXF text rotation is ignored.
+- Pairs SIZE+TYPE mutual-nearest (800 mm, then 1500 mm, then a greedy pass). Greedy 1500 mm alone let a SIZE grab the next bay's TYPE and dropped a family in the aisle.
+- Writes the family position at the **bay centre** (midpoint of the two label lines), not at the SIZE label.
+- Dynamo measures each placed footprint and turns it onto the bay axis about the footprint centre, then centres it on the bay. Rotating about the insertion point swung bodies off their bays, because these families are not centred on their origin.
 - Matches SIZE+TYPE with mutual nearest-neighbour and a ~700 mm stack window so adjacent 1200 mm bays are not paired.
 - Infers orientation from neighbouring bay centres (1200 / 1500 / 1800 mm runs). This is what aligns the Marrickville south wall, west wall, and 45° corner.
 - Writes three angle fields:
@@ -52,7 +56,7 @@ The 5 Oct 2026 run placed **1526 / 1593** items and every family landed at **0°
 
 ## How to run
 
-1. Replace **both** files. These are your original File1 / File2. Dynamo must report `2026-10-05m-original-files`. Re-run the detector (leftover named blocks, 1500 mm pairing, XY = SIZE label) so it writes `gondola_data_Marrickville_New4.json`, then run Dynamo. Do not reuse New2 / New3.
+1. Replace **both** files. Dynamo must report `2026-10-05n-fit-bays`. Re-run the detector (leftover named blocks, mutual-nearest pairing, XY = bay centre) so it writes `gondola_data_Marrickville_New4.json`, then run Dynamo. Do not reuse New2 / New3.
 2. Copy only `Gondola_OrientationDetector.py` into the Tracing folder. It is standalone — an old `gondola_lib.py` in that folder is ignored.
 3. Edit `DXF_FILE_PATH` and `OUTPUT_JSON` at the top of `Gondola_OrientationDetector.py`. Use the Existing Conditions GROUND DXF.
 4. `pip install ezdxf` if needed, then run the detector.

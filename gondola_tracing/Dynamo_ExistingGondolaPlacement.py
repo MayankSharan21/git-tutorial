@@ -1,7 +1,7 @@
 # Dynamo_ExistingGondolaPlacement
 # Revit 2025 / Dynamo CPython3 compatible
 #
-# Version 2026-10-05m-original-files
+# Version 2026-10-05n-fit-bays
 # Original File2 placement (CAD offset always on). Only orientation
 # reading and Existing-view lock are changed.
 #
@@ -75,7 +75,7 @@ JSON_PATH = r"C:\Users\msharan\OneDrive - Kmart Australia Limited\Desktop\Stores
 
 LEVEL_NAME = "00-GROUND"
 VIEW_NAME = "1.0 EXISTING CONDITIONS - GROUND"
-SCRIPT_VERSION = "2026-10-05m-original-files"
+SCRIPT_VERSION = "2026-10-05n-fit-bays"
 
 # Partial CAD import name.
 # Leave "" to automatically use the first suitable CAD import.
@@ -748,6 +748,231 @@ def get_json_angle(g):
             pass
 
     return None
+
+
+def fold_line_angle(angle):
+
+    """
+    Fold a direction onto 0 <= angle < 180. A bay at 0 and 180
+    degrees is the same line.
+    """
+
+    try:
+        angle = float(angle)
+    except Exception:
+        return 0.0
+
+    angle = angle % 180.0
+
+    if angle < 0:
+        angle += 180.0
+
+    if abs(angle - 180.0) < 1e-6:
+        angle = 0.0
+
+    return angle
+
+
+def get_bay_axis(g):
+
+    """
+    Long axis of the bay run, in degrees (0 = +X, 90 = +Y).
+
+    The detector writes this as orientation_angle. revit_angle is the
+    same line turned 90 degrees, so either key can be used.
+    """
+
+    value = g.get("orientation_angle", None)
+
+    if value is not None:
+        try:
+            return fold_line_angle(value)
+        except Exception:
+            pass
+
+    for key in ("revit_angle", "angle"):
+
+        value = g.get(key, None)
+
+        if value is None:
+            continue
+
+        try:
+            return fold_line_angle(float(value) + 90.0)
+        except Exception:
+            pass
+
+    orientation = str(g.get("orientation", "")).upper().strip()
+
+    if orientation == "VERTICAL":
+        return 90.0
+
+    return 0.0
+
+
+def footprint_alignment_delta(width, depth, bay_axis):
+
+    """
+    Degrees to turn a placed footprint so its long side follows the bay.
+
+    Measuring the placed box avoids guessing which way a family type is
+    drawn at rotation 0, and avoids assuming the origin is centred.
+    """
+
+    bay_axis = fold_line_angle(bay_axis)
+
+    try:
+        width = float(width)
+        depth = float(depth)
+    except Exception:
+        return 0.0
+
+    if abs(width - depth) < 1e-6:
+        current = bay_axis
+    elif width >= depth:
+        current = 0.0
+    else:
+        current = 90.0
+
+    delta = bay_axis - current
+
+    if delta > 90.0:
+        delta -= 180.0
+    elif delta < -90.0:
+        delta += 180.0
+
+    return delta
+
+
+def instance_plan_box(instance):
+
+    """
+    Plan bounding box of a placed instance, in feet.
+    """
+
+    try:
+        box = instance.get_BoundingBox(None)
+    except Exception:
+        box = None
+
+    if box is None:
+        return None
+
+    try:
+        return (
+            box.Min.X,
+            box.Min.Y,
+            box.Max.X,
+            box.Max.Y
+        )
+    except Exception:
+        return None
+
+
+def align_instance_to_bay(doc, instance, target, bay_axis):
+
+    """
+    Turn the placed footprint onto the bay axis, then centre it on
+    the bay point. Returns a short note for the report.
+    """
+
+    box = instance_plan_box(instance)
+
+    if box is None:
+
+        # No geometry to measure. Fall back to the old behaviour so the
+        # family is at least rotated.
+        angle = math.radians(
+            fold_line_angle(bay_axis + 90.0)
+        )
+
+        if abs(angle) > 1e-6:
+
+            axis = Line.CreateBound(
+                target,
+                XYZ(target.X, target.Y, target.Z + 1.0)
+            )
+
+            ElementTransformUtils.RotateElement(
+                doc,
+                instance.Id,
+                axis,
+                angle
+            )
+
+        return "no bounding box, rotated about insertion point"
+
+    min_x, min_y, max_x, max_y = box
+
+    delta = footprint_alignment_delta(
+        max_x - min_x,
+        max_y - min_y,
+        bay_axis
+    )
+
+    rotated = False
+
+    if abs(delta) > 0.01:
+
+        centre = XYZ(
+            (min_x + max_x) / 2.0,
+            (min_y + max_y) / 2.0,
+            target.Z
+        )
+
+        pivot = Line.CreateBound(
+            centre,
+            XYZ(centre.X, centre.Y, centre.Z + 1.0)
+        )
+
+        try:
+
+            ElementTransformUtils.RotateElement(
+                doc,
+                instance.Id,
+                pivot,
+                math.radians(delta)
+            )
+
+            rotated = True
+
+        except Exception:
+            pass
+
+        box = instance_plan_box(instance) or box
+        min_x, min_y, max_x, max_y = box
+
+    centre_x = (min_x + max_x) / 2.0
+    centre_y = (min_y + max_y) / 2.0
+
+    shift_x = target.X - centre_x
+    shift_y = target.Y - centre_y
+
+    moved = False
+
+    if abs(shift_x) > 1e-6 or abs(shift_y) > 1e-6:
+
+        try:
+
+            ElementTransformUtils.MoveElement(
+                doc,
+                instance.Id,
+                XYZ(shift_x, shift_y, 0.0)
+            )
+
+            moved = True
+
+        except Exception:
+            pass
+
+    return (
+        "axis={:.1f}° turned={:.1f}° centred=({:.0f},{:.0f}) mm".format(
+            fold_line_angle(bay_axis),
+            delta if rotated else 0.0,
+            shift_x * 304.8 if moved else 0.0,
+            shift_y * 304.8 if moved else 0.0
+        )
+    )
 
 
 def get_orientation(g):
@@ -1519,6 +1744,7 @@ placed = []
 skipped = []
 wall_placed = []
 orientation_report = []
+alignment_notes = []
 
 
 for g in gondolas:
@@ -1732,32 +1958,36 @@ for g in gondolas:
 
 
         # ---------------------------------------------------------------
-        # ROTATE ABOUT INSTANCE INSERTION POINT
+        # ALIGN THE FAMILY FOOTPRINT TO THE BAY
         # ---------------------------------------------------------------
+        #
+        # Rotating about the insertion point swung the body off the
+        # bay, because most of these families are not centred on their
+        # origin. Measure the placed footprint instead:
+        #
+        #   1. rotate by the difference between the footprint's long
+        #      axis and the bay's long axis, about the footprint centre
+        #   2. move the footprint centre onto the bay centre
+        #
+        # This needs no assumption about family origin or which way a
+        # type is drawn at 0 degrees.
 
-        if (
-            angle_deg is not None
-            and abs(angle_deg) > 0.0001
-        ):
+        bay_axis = get_bay_axis(g)
 
-            angle_rad = math.radians(
-                angle_deg
-            )
+        align_note = align_instance_to_bay(
+            doc,
+            instance,
+            point,
+            bay_axis
+        )
 
-            axis = Line.CreateBound(
-                point,
-                XYZ(
-                    point.X,
-                    point.Y,
-                    point.Z + 1.0
+        if align_note:
+
+            alignment_notes.append(
+                "{} | {}".format(
+                    code,
+                    align_note
                 )
-            )
-
-            ElementTransformUtils.RotateElement(
-                doc,
-                instance.Id,
-                axis,
-                angle_rad
             )
 
 
@@ -1934,6 +2164,11 @@ lines = [
         APPLY_CAD_ROTATION
     ),
 
+    "  Footprint aligned    : {} of {}".format(
+        len(alignment_notes),
+        len(placed)
+    ),
+
     "",
 
     "ALL CAD IMPORTS:"
@@ -1971,6 +2206,33 @@ if orientation_report:
         [
             "    " + x
             for x in orientation_report
+        ]
+    )
+
+else:
+
+    lines.append(
+        "    NONE"
+    )
+
+
+# ===========================================================================
+# FOOTPRINT ALIGNMENT
+# ===========================================================================
+
+lines.extend(
+    [
+        "",
+        "FOOTPRINT ALIGNED TO BAY:"
+    ]
+)
+
+if alignment_notes:
+
+    lines.extend(
+        [
+            "    " + x
+            for x in alignment_notes
         ]
     )
 

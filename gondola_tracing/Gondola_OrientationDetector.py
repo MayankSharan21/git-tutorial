@@ -1,7 +1,7 @@
 # Gondola_OrientationDetector.py
 #
 # Original File1 collector (the run that filled most bays).
-# Version 2026-10-05m-original-files
+# Version 2026-10-05n-fit-bays
 #
 # Only orientation is corrected after collect:
 #   leftover named blocks + modelspace TEXT, MATCH_DIST 1500,
@@ -72,7 +72,7 @@ except Exception:
 DXF_FILE_PATH = r"C:\Users\msharan\OneDrive - Kmart Australia Limited\Desktop\Stores Foundry\PPT , Requirements, Demo videos, Pics\1131 Marrickville-Existing plan trace exercise_2 - Floor Plan - 1-0 EXISTING CONDITIONS - GROUND.dxf"
 
 OUTPUT_JSON = r"C:\Users\msharan\OneDrive - Kmart Australia Limited\Desktop\Stores Foundry\Tracing\json\gondola_data_Marrickville_New4.json"
-SCRIPT_VERSION = "2026-10-05m-original-files"
+SCRIPT_VERSION = "2026-10-05n-fit-bays"
 
 
 # ============================================================
@@ -966,63 +966,72 @@ def extract_with_orientation(dxf_path):
     # ========================================================
 
     used_indices = set()
+    used_sizes = set()
 
     gondolas = []
 
+    # SIZE + TYPE are two lines of one bay label. Pairing greedily at
+    # 1500 mm let a SIZE grab the TYPE of the NEXT bay, which put a
+    # family in the aisle. Pair mutual nearest first, then relax, so
+    # coverage stays the same but cross-bay pairs are gone.
 
-    for size_item in size_texts:
+    def _dist(a, b):
+        return math.sqrt(
+            (b["x"] - a["x"]) ** 2 +
+            (b["y"] - a["y"]) ** 2
+        )
+
+    def _nearest_type(size_item, max_dist):
+        best_i = None
+        best_d = max_dist
+        for i, type_item in enumerate(type_texts):
+            if i in used_indices:
+                continue
+            d = _dist(size_item, type_item)
+            if d < best_d:
+                best_d = d
+                best_i = i
+        return best_i, best_d
+
+    def _nearest_size(type_item, max_dist):
+        best_i = None
+        best_d = max_dist
+        for i, size_item in enumerate(size_texts):
+            if i in used_sizes:
+                continue
+            d = _dist(type_item, size_item)
+            if d < best_d:
+                best_d = d
+                best_i = i
+        return best_i, best_d
+
+    matched_pairs = []
+
+    for max_dist, require_mutual in (
+        (800.0, True),
+        (MATCH_DIST, True),
+        (MATCH_DIST, False),
+    ):
+        for si, size_item in enumerate(size_texts):
+            if si in used_sizes:
+                continue
+            ti, dist = _nearest_type(size_item, max_dist)
+            if ti is None:
+                continue
+            if require_mutual:
+                back, _ = _nearest_size(type_texts[ti], max_dist)
+                if back != si:
+                    continue
+            used_sizes.add(si)
+            used_indices.add(ti)
+            matched_pairs.append((size_item, type_texts[ti], dist))
+
+    for size_item, type_item, best_dist in matched_pairs:
 
         sx = size_item["x"]
         sy = size_item["y"]
 
-        best = None
-        best_dist = MATCH_DIST
-
-
-        for i, type_item in enumerate(
-            type_texts
-        ):
-
-            if i in used_indices:
-                continue
-
-
-            tx = type_item["x"]
-            ty = type_item["y"]
-
-
-            dx = tx - sx
-            dy = ty - sy
-
-
-            dist = math.sqrt(
-                dx * dx +
-                dy * dy
-            )
-
-
-            if dist < best_dist:
-
-                best_dist = dist
-
-                best = (
-                    i,
-                    type_item
-                )
-
-
-        # ----------------------------------------------------
-        # MATCH FOUND
-        # ----------------------------------------------------
-
-        if best:
-
-            idx, type_item = best
-
-            used_indices.add(
-                idx
-            )
-
+        if True:
 
             tx = type_item["x"]
             ty = type_item["y"]
@@ -1069,11 +1078,14 @@ def extract_with_orientation(dxf_path):
                 "bottom":
                     type_item["text"],
 
+                # Bay centre, not the SIZE label. The two label lines
+                # straddle the bay centre line, so the SIZE label alone
+                # pushed every family off its bay.
                 "x":
-                    sx,
+                    round((sx + tx) / 2.0, 3),
 
                 "y":
-                    sy,
+                    round((sy + ty) / 2.0, 3),
 
                 # Keep SIZE label rotation
                 "rotation":

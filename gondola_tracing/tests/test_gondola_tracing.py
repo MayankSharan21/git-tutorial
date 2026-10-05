@@ -28,8 +28,11 @@ from gondola_lib import (
     merge_nearby_phrases,
     normalize_line_angle,
     pick_json_angle,
+    bay_axis_from_item,
     compatible_leftover_labels,
     estimated_gondola_yield,
+    fold_line_angle,
+    footprint_alignment_delta,
     pick_label_set,
     should_apply_cad_translation,
     should_scan_leftover,
@@ -373,6 +376,45 @@ class AngleTests(unittest.TestCase):
     def test_line_fold(self):
         self.assertEqual(normalize_line_angle(180), 0.0)
         self.assertEqual(normalize_line_angle(270), 90.0)
+
+
+class FootprintAlignmentTests(unittest.TestCase):
+    def test_bay_axis_prefers_long_axis_field(self):
+        self.assertEqual(bay_axis_from_item({"orientation_angle": 0.0}), 0.0)
+        self.assertEqual(bay_axis_from_item({"orientation_angle": 90.0}), 90.0)
+        self.assertEqual(bay_axis_from_item({"orientation_angle": 180.0}), 0.0)
+
+    def test_bay_axis_converts_family_rotation(self):
+        # Old JSON without orientation_angle: revit_angle 90 means a
+        # horizontal run, so the bay axis is 0.
+        self.assertEqual(bay_axis_from_item({"revit_angle": 90.0}), 0.0)
+        self.assertEqual(bay_axis_from_item({"angle": 0.0}), 90.0)
+        self.assertEqual(bay_axis_from_item({"orientation": "VERTICAL"}), 90.0)
+        self.assertEqual(bay_axis_from_item({}), 0.0)
+
+    def test_wide_footprint_on_horizontal_bay_needs_no_turn(self):
+        self.assertEqual(footprint_alignment_delta(4.0, 2.0, 0.0), 0.0)
+
+    def test_wide_footprint_on_vertical_bay_turns_ninety(self):
+        self.assertEqual(footprint_alignment_delta(4.0, 2.0, 90.0), 90.0)
+
+    def test_tall_footprint_on_horizontal_bay_turns_back(self):
+        # A family already drawn along +Y must turn -90, not +90, so it
+        # does not swing onto the neighbouring aisle.
+        self.assertEqual(footprint_alignment_delta(2.0, 4.0, 0.0), -90.0)
+
+    def test_diagonal_bay_turns_from_measured_axis(self):
+        self.assertEqual(footprint_alignment_delta(4.0, 2.0, 45.0), 45.0)
+        self.assertEqual(footprint_alignment_delta(4.0, 2.0, 135.0), -45.0)
+        self.assertEqual(footprint_alignment_delta(2.0, 4.0, 135.0), 45.0)
+
+    def test_square_footprint_is_left_alone(self):
+        self.assertEqual(footprint_alignment_delta(3.0, 3.0, 90.0), 0.0)
+
+    def test_fold(self):
+        self.assertEqual(fold_line_angle(270.0), 90.0)
+        self.assertEqual(fold_line_angle(-90.0), 90.0)
+        self.assertEqual(fold_line_angle(360.0), 0.0)
 
 
 class MatchingTests(unittest.TestCase):

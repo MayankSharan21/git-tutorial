@@ -795,6 +795,68 @@ def should_apply_cad_translation(xs, cad_x_mm, pad_mm=80000.0):
     return not (cad_x_mm - pad_mm <= min_x <= cad_x_mm + 250000.0)
 
 
+def fold_line_angle(angle):
+    """Fold a direction onto 0 <= angle < 180."""
+    try:
+        angle = float(angle)
+    except (TypeError, ValueError):
+        return 0.0
+    angle = angle % 180.0
+    if angle < 0:
+        angle += 180.0
+    if abs(angle - 180.0) < 1e-6:
+        angle = 0.0
+    return angle
+
+
+def bay_axis_from_item(item):
+    """
+    Long axis of the bay for one JSON item, 0 = +X, 90 = +Y.
+
+    orientation_angle already is the long axis. revit_angle / angle
+    are the family rotation, which is the same line turned 90.
+    """
+    value = (item or {}).get("orientation_angle")
+    if value is not None:
+        return fold_line_angle(value)
+    for key in ("revit_angle", "angle"):
+        value = (item or {}).get(key)
+        if value is not None:
+            return fold_line_angle(float(value) + 90.0)
+    if str((item or {}).get("orientation", "")).upper().strip() == "VERTICAL":
+        return 90.0
+    return 0.0
+
+
+def footprint_alignment_delta(width, depth, bay_axis):
+    """
+    Degrees to turn a placed footprint so its long side follows the bay.
+
+    Measuring the placed box avoids guessing which way a family type is
+    drawn at rotation 0, and avoids assuming the origin is centred.
+    """
+    bay_axis = fold_line_angle(bay_axis)
+    try:
+        width = float(width)
+        depth = float(depth)
+    except (TypeError, ValueError):
+        return 0.0
+
+    if abs(width - depth) < 1e-6:
+        current = bay_axis
+    elif width >= depth:
+        current = 0.0
+    else:
+        current = 90.0
+
+    delta = bay_axis - current
+    if delta > 90.0:
+        delta -= 180.0
+    elif delta < -90.0:
+        delta += 180.0
+    return delta
+
+
 def load_gondola_items(data):
     """Accept {gondolas: [...]} or a bare list from older detector runs."""
     if isinstance(data, list):
