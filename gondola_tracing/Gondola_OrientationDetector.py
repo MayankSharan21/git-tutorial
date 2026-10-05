@@ -193,7 +193,7 @@ PHRASE_JOINS = (
     (("T3", "TABLE"), "T3 TABLE"),
 )
 
-OVERLAP_DEDUP_MM = 350.0
+OVERLAP_DEDUP_MM = 550.0
 
 # Typical bay centres along a gondola run, millimetres.
 BAY_SPACINGS_MM = (1200.0, 1500.0, 1800.0, 2100.0, 900.0, 2400.0, 600.0)
@@ -660,8 +660,34 @@ def has_classified_gondola(labels):
 
 
 def should_scan_leftover(labels):
-    """Scan leftover blocks only when modelspace has no gondola codes."""
+    """Scan leftover blocks when modelspace has no gondola codes."""
     return not has_classified_gondola(labels)
+
+
+def compatible_leftover_labels(base_labels, extra_labels, pad_mm=80000.0):
+    """Keep leftover labels in the same coordinate island as modelspace."""
+    if not extra_labels:
+        return []
+    classified_base = [
+        lab for lab in (base_labels or [])
+        if identify_text(lab.get("text", ""))
+    ]
+    if not classified_base:
+        return list(extra_labels)
+    xs = [float(lab["x"]) for lab in classified_base]
+    ys = [float(lab["y"]) for lab in classified_base]
+    min_x, max_x = min(xs), max(xs)
+    min_y, max_y = min(ys), max(ys)
+    kept = []
+    for lab in extra_labels:
+        try:
+            x = float(lab["x"])
+            y = float(lab["y"])
+        except (TypeError, ValueError, KeyError):
+            continue
+        if min_x - pad_mm <= x <= max_x + pad_mm and min_y - pad_mm <= y <= max_y + pad_mm:
+            kept.append(lab)
+    return kept
 
 
 def is_layout_block(name):
@@ -1345,22 +1371,23 @@ def collect_dxf_labels(dxf_path):
     print("Modelspace labels : {}".format(len(labels)))
 
     leftover_used = 0
-    if should_scan_leftover(labels):
-        print("Modelspace had no gondola codes. Scanning leftover block definitions...")
-        extra, skipped_proposed = _scan_leftover_blocks(doc, skip_proposed=True)
-        print(
-            "Leftover (existing/unknown): {}  skipped proposed-named: {}".format(
-                len(extra), skipped_proposed
-            )
+    print("Scanning leftover existing/unknown block definitions...")
+    extra, skipped_proposed = _scan_leftover_blocks(doc, skip_proposed=True)
+    extra = compatible_leftover_labels(labels, extra)
+    print(
+        "Leftover compatible existing/unknown: {}  skipped proposed-named: {}".format(
+            len(extra), skipped_proposed
         )
-        if should_scan_leftover(extra):
-            print("Leftover existing/unknown had no codes. Including proposed-named leftover blocks...")
-            extra, _ = _scan_leftover_blocks(doc, skip_proposed=False)
-            print("Leftover (all named blocks): {}".format(len(extra)))
-        leftover_used = len(extra)
-        labels.extend(extra)
-    else:
-        print("Modelspace already has gondola codes. Skipping leftover blocks.")
+    )
+    labels.extend(extra)
+    leftover_used = len(extra)
+    if should_scan_leftover(labels):
+        print("Still no gondola codes. Including proposed-named leftover blocks...")
+        extra_all, _ = _scan_leftover_blocks(doc, skip_proposed=False)
+        extra_all = compatible_leftover_labels(labels, extra_all)
+        print("Leftover compatible (all named blocks): {}".format(len(extra_all)))
+        labels.extend(extra_all)
+        leftover_used = len(extra_all)
 
     labels, source_info = keep_existing_source_labels(labels, EXISTING_ONLY)
     print("Labels after source filter: {}".format(len(labels)))

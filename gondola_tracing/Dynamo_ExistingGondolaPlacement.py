@@ -1,7 +1,7 @@
 # Dynamo_ExistingGondolaPlacement
 # Revit 2025 / Dynamo CPython3 compatible
 #
-# Version 2026-10-05h-cad-space
+# Version 2026-10-05i-clean-trace
 #
 # Places existing-condition gondolas from the JSON written by
 # Gondola_OrientationDetector.py.
@@ -70,7 +70,7 @@ MM_TO_FT = 1.0 / 304.8
 
 # Hard rule: place only on Existing. Never Proposed, selling-floor, or overlay.
 EXISTING_ONLY = True
-SCRIPT_VERSION = "2026-10-05h-cad-space"
+SCRIPT_VERSION = "2026-10-05i-clean-trace"
 TRACE_NOTE_PREFIX = "EG:"
 
 USE_JSON_ANGLE = True
@@ -420,6 +420,16 @@ TYPE_MAP_FALLBACKS = {
     "27HLO": ("End_Panel", "27SELO"),
     "6WAY": ("Hotspots", "Racking-6_Way"),
     "STRAIGHT RAIL": ("Hotspots", "racking-straight rail"),
+    "16_WAY": ("Hotspots", "Racking-6_Way"),
+    "T2 TABLE": ("Decks_&_Hopper", "LRD"),
+    "T2 ARM ONLY": ("Decks_&_Hopper", "LRD"),
+    "T2 NO RAIL/ARMS": ("Decks_&_Hopper", "LRD"),
+    "T3 TABLE": ("Decks_&_Hopper", "LRD"),
+    "HANGER TOTEM": ("Decks_&_Hopper", "LRD"),
+    "DECK TABLE": ("Decks_&_Hopper", "LRD"),
+    "27POSTER 540 END": ("End_Panel", "21POSTER END"),
+    "34SEMV 540 END": ("End_Panel", "34SELC"),
+    "26DELW - DIVIDING WALL - END": ("End_Panel", "15ELC"),
 }
 
 
@@ -905,18 +915,27 @@ def resolve_symbol(family_name, type_name):
     return None, family_name, type_name
 
 
+def compact_lookup(text):
+    return re.sub(r"[^A-Z0-9]+", "", str(text or "").upper())
+
+
 def resolve_mapping(code):
     mapping = TYPE_MAP_NORM.get(code)
-    used_fallback = False
-    if mapping is None:
-        return None, False
-    symbol, fname, tname = resolve_symbol(*mapping)
-    if symbol is not None:
-        return (symbol, fname, tname), False
-    fallback = FALLBACK_NORM.get(code)
-    if fallback is not None:
-        symbol, fname, tname = resolve_symbol(*fallback)
+    if mapping is not None:
+        symbol, fname, tname = resolve_symbol(*mapping)
         if symbol is not None:
+            return (symbol, fname, tname), False
+        fallback = FALLBACK_NORM.get(code)
+        if fallback is not None:
+            symbol, fname, tname = resolve_symbol(*fallback)
+            if symbol is not None:
+                return (symbol, fname, tname), True
+    compact = compact_lookup(code)
+    if len(compact) < 4:
+        return None, False
+    for (fname, tname), symbol in symbol_lookup.items():
+        ct = compact_lookup(tname)
+        if ct == compact or (len(compact) >= 5 and compact in ct):
             return (symbol, fname, tname), True
     return None, False
 
@@ -1292,12 +1311,6 @@ else:
     prepare_view_for_gondolas(target_view, visibility_notes)
     visibility_notes.append("Prepared Existing view '{}'".format(target_view.Name))
 
-    text_type = None
-    try:
-        text_type = FilteredElementCollector(doc).OfClass(TextNoteType).FirstElement()
-    except Exception:
-        text_type = None
-
     try:
         for note in FilteredElementCollector(doc, target_view.Id).OfClass(TextNote):
             try:
@@ -1305,6 +1318,7 @@ else:
                     doc.Delete(note.Id)
             except Exception:
                 pass
+        visibility_notes.append("Removed EG: tags from the Existing view")
     except Exception:
         pass
 
@@ -1449,19 +1463,6 @@ else:
                     pass
 
             placed_ids.append(instance.Id)
-
-            if text_type is not None:
-                try:
-                    TextNote.Create(
-                        doc,
-                        target_view.Id,
-                        point,
-                        TRACE_NOTE_PREFIX + code,
-                        text_type.Id,
-                    )
-                    notes_written += 1
-                except Exception:
-                    pass
 
             orientation, angle_deg, angle_source = get_orientation(item)
             if APPLY_CAD_ROTATION and angle_deg is not None:

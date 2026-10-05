@@ -51,7 +51,7 @@ The 5 Oct 2026 run placed **1526 / 1593** items and every family landed at **0°
 
 ## How to run
 
-1. Replace the Dynamo script. It must report `2026-10-05h-cad-space`. If families appear as a second store to the right of the CAD, the JSON was already in CAD space and the CAD offset was applied twice. This version skips that second offset.
+1. Replace **both** files. Dynamo must report `2026-10-05i-clean-trace`. It deletes the `EG:` tags (those were sitting on the CAD labels). Re-run the detector so leftover Existing SIZE+TYPE labels are merged, then run Dynamo.
 2. Copy only `Gondola_OrientationDetector.py` into the Tracing folder. It is standalone — an old `gondola_lib.py` in that folder is ignored.
 3. Edit `DXF_FILE_PATH` and `OUTPUT_JSON` at the top of `Gondola_OrientationDetector.py`. Use the Existing Conditions GROUND DXF.
 4. `pip install ezdxf` if needed, then run the detector.
