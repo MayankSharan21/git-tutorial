@@ -51,7 +51,7 @@ The 5 Oct 2026 run placed **1526 / 1593** items and every family landed at **0°
 
 ## How to run
 
-1. Replace both files. Dynamo must report `2026-10-05d-existing-view`. If it does not, families will land on `00-GROUND` and stay invisible on `1.0 EXISTING CONDITIONS - GROUND`.
+1. Replace the Dynamo script. It must report `2026-10-05e-force-visible`. The Existing Conditions view template hides model families (CAD still shows). This version detaches that template on the view, matches the view phase, and opens `EXISTING GONDOLA TRACE - GROUND` if needed.
 2. Copy only `Gondola_OrientationDetector.py` into the Tracing folder. It is standalone — an old `gondola_lib.py` in that folder is ignored.
 3. Edit `DXF_FILE_PATH` and `OUTPUT_JSON` at the top of `Gondola_OrientationDetector.py`. Use the Existing Conditions GROUND DXF.
 4. `pip install ezdxf` if needed, then run the detector.

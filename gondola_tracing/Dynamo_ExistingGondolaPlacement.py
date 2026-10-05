@@ -1,7 +1,7 @@
 # Dynamo_ExistingGondolaPlacement
 # Revit 2025 / Dynamo CPython3 compatible
 #
-# Version 2026-10-05d-existing-view
+# Version 2026-10-05e-force-visible
 #
 # Places existing-condition gondolas from the JSON written by
 # Gondola_OrientationDetector.py.
@@ -40,6 +40,15 @@ from Autodesk.Revit.DB import (
     OverrideGraphicSettings,
     Color,
     ImportInstance,
+    ElementId,
+    Category,
+    BuiltInCategory,
+    PhaseFilter,
+    PlanViewPlane,
+    ViewFamilyType,
+    ViewFamily,
+    TemporaryViewMode,
+    WorksetVisibility,
 )
 from Autodesk.Revit.DB.Structure import StructuralType
 from RevitServices.Persistence import DocumentManager
@@ -53,7 +62,7 @@ MM_TO_FT = 1.0 / 304.8
 
 # Hard rule: place only on Existing. Never Proposed, selling-floor, or overlay.
 EXISTING_ONLY = True
-SCRIPT_VERSION = "2026-10-05d-existing-view"
+SCRIPT_VERSION = "2026-10-05e-force-visible"
 
 USE_JSON_ANGLE = True
 ANGLE_SIGN = 1.0
@@ -895,6 +904,7 @@ for view in all_views:
         pass
 
 active_view = None
+uidoc = None
 try:
     uiapp = DocumentManager.Instance.CurrentUIApplication
     uidoc = uiapp.ActiveUIDocument if uiapp is not None else None
@@ -902,6 +912,7 @@ try:
         active_view = uidoc.ActiveView
 except Exception:
     active_view = None
+    uidoc = None
 
 placement_reason = "auto"
 chosen_view_name = None
@@ -985,7 +996,7 @@ level_override_info = (
 
 
 # ---------------------------------------------------------------------------
-# Graphics / phase
+# Graphics / phase / view visibility
 # ---------------------------------------------------------------------------
 
 BLUE = Color(0, 102, 204)
@@ -1012,7 +1023,134 @@ for phase in all_phases:
         pass
 if existing_phase is None and all_phases:
     existing_phase = all_phases[0]
-phase_info = existing_phase.Name if existing_phase else "not set"
+
+
+def invalid_element_id():
+    try:
+        return ElementId.InvalidElementId
+    except Exception:
+        return ElementId(-1)
+
+
+def get_view_phase(view):
+    if view is None:
+        return None
+    try:
+        param = view.get_Parameter(BuiltInParameter.VIEW_PHASE)
+        if param is None:
+            return None
+        return doc.GetElement(param.AsElementId())
+    except Exception:
+        return None
+
+
+def prepare_view_for_gondolas(view, notes):
+    """
+    Existing Conditions templates hide model categories so only CAD shows.
+    Detach the template on this view and turn gondola categories on.
+    """
+    if view is None:
+        return
+
+    try:
+        tid = view.ViewTemplateId
+        if tid is not None and tid != invalid_element_id() and tid.IntegerValue != -1:
+            template = doc.GetElement(tid)
+            tname = safe_element_name(template) if template is not None else str(tid)
+            view.ViewTemplateId = invalid_element_id()
+            notes.append("Detached view template '{}' so families can display".format(tname))
+    except Exception as ex:
+        notes.append("Could not detach view template: {}".format(ex))
+
+    try:
+        view.DisableTemporaryViewMode(TemporaryViewMode.TemporaryHideIsolate)
+    except Exception:
+        pass
+    try:
+        view.DisableTemporaryViewMode(TemporaryViewMode.RevealHiddenElements)
+    except Exception:
+        pass
+
+    for bic in (
+        BuiltInCategory.OST_SpecialityEquipment,
+        BuiltInCategory.OST_Furniture,
+        BuiltInCategory.OST_GenericModel,
+        BuiltInCategory.OST_Casework,
+        BuiltInCategory.OST_MechanicalEquipment,
+        BuiltInCategory.OST_FurnitureSystems,
+    ):
+        try:
+            cat = Category.GetCategory(doc, bic)
+            if cat is not None:
+                view.SetCategoryHidden(cat.Id, False)
+        except Exception:
+            pass
+
+    try:
+        pf_param = view.get_Parameter(BuiltInParameter.VIEW_PHASE_FILTER)
+        if pf_param is not None and not pf_param.IsReadOnly:
+            chosen = None
+            for pf in FilteredElementCollector(doc).OfClass(PhaseFilter):
+                pname = str(pf.Name).lower()
+                if "show all" in pname or pname in ("all", "complete", "show complete"):
+                    chosen = pf
+                    break
+            if chosen is None:
+                for pf in FilteredElementCollector(doc).OfClass(PhaseFilter):
+                    if "previous" in str(pf.Name).lower() and "new" in str(pf.Name).lower():
+                        chosen = pf
+                        break
+            if chosen is not None:
+                pf_param.Set(chosen.Id)
+                notes.append("Phase filter set to '{}'".format(chosen.Name))
+    except Exception as ex:
+        notes.append("Could not set phase filter: {}".format(ex))
+
+    try:
+        view_range = view.GetViewRange()
+        view_range.SetOffset(PlanViewPlane.TopClip, 10.0)
+        view_range.SetOffset(PlanViewPlane.CutPlane, 4.0)
+        view_range.SetOffset(PlanViewPlane.BottomClip, -4.0)
+        view_range.SetOffset(PlanViewPlane.ViewDepth, -10.0)
+        view.SetViewRange(view_range)
+        notes.append("View range opened to +/- 10 ft")
+    except Exception:
+        pass
+
+
+def find_or_create_trace_view(level):
+    wanted = "EXISTING GONDOLA TRACE - GROUND"
+    for view in FilteredElementCollector(doc).OfClass(ViewPlan):
+        try:
+            if str(view.Name).strip().upper() == wanted:
+                return view, False
+        except Exception:
+            pass
+    vft = None
+    for vt in FilteredElementCollector(doc).OfClass(ViewFamilyType):
+        try:
+            if vt.ViewFamily == ViewFamily.FloorPlan:
+                vft = vt
+                break
+        except Exception:
+            pass
+    if vft is None or level is None:
+        return None, False
+    view = ViewPlan.Create(doc, vft.Id, level.Id)
+    try:
+        view.Name = wanted
+    except Exception:
+        pass
+    return view, True
+
+
+view_phase = get_view_phase(target_view)
+placement_phase = view_phase if view_phase is not None else existing_phase
+phase_info = placement_phase.Name if placement_phase else "not set"
+if view_phase is not None:
+    phase_info = "{} (from view '{}')".format(view_phase.Name, target_view.Name)
+visibility_notes = []
+trace_view = None
 
 
 # ---------------------------------------------------------------------------
@@ -1049,6 +1187,20 @@ else:
     t = Transaction(doc, "Place Existing Conditions Gondolas")
     t.Start()
 
+    prepare_view_for_gondolas(target_view, visibility_notes)
+    if target_view is not None:
+        visibility_notes.append("Prepared view '{}'".format(target_view.Name))
+
+    trace_view, created_trace = find_or_create_trace_view(target_level)
+    if trace_view is not None:
+        prepare_view_for_gondolas(trace_view, visibility_notes)
+        visibility_notes.append(
+            "{} view '{}'".format(
+                "Created" if created_trace else "Reused",
+                trace_view.Name,
+            )
+        )
+
     all_instances = list(
         FilteredElementCollector(doc).OfClass(FamilyInstance).ToElements()
     )
@@ -1080,14 +1232,6 @@ else:
                         continue
                 except Exception:
                     continue
-            if existing_phase is not None:
-                try:
-                    ph_param = inst.get_Parameter(BuiltInParameter.PHASE_CREATED)
-                    if ph_param is not None:
-                        if ph_param.AsElementId() != existing_phase.Id:
-                            continue
-                except Exception:
-                    pass
             doc.Delete(inst.Id)
             deleted_count += 1
         except Exception:
@@ -1110,6 +1254,9 @@ else:
             pass
 
     doc.Regenerate()
+
+    placed_ids = []
+    display_views = [v for v in (target_view, trace_view) if v is not None]
 
     for item in gondolas:
         try:
@@ -1163,31 +1310,38 @@ else:
                 StructuralType.NonStructural,
             )
 
-            if existing_phase is not None:
+            if placement_phase is not None:
                 try:
                     p_created = instance.get_Parameter(BuiltInParameter.PHASE_CREATED)
                     if p_created is not None and not p_created.IsReadOnly:
-                        p_created.Set(existing_phase.Id)
+                        p_created.Set(placement_phase.Id)
                 except Exception:
                     pass
 
-            if target_view is not None:
+            try:
+                target_view.SetWorksetVisibility(instance.WorksetId, WorksetVisibility.Visible)
+            except Exception:
+                pass
+
+            for show_view in display_views:
                 try:
                     cat = instance.Category
                     if cat is None and symbol is not None:
                         cat = symbol.Category
                     if cat is not None:
-                        target_view.SetCategoryHidden(cat.Id, False)
+                        show_view.SetCategoryHidden(cat.Id, False)
                 except Exception:
                     pass
                 try:
-                    target_view.SetElementOverrides(instance.Id, color_override)
+                    show_view.SetElementOverrides(instance.Id, color_override)
                 except Exception:
                     pass
                 try:
-                    target_view.UnhideElements([instance.Id])
+                    show_view.UnhideElements([instance.Id])
                 except Exception:
                     pass
+
+            placed_ids.append(instance.Id)
 
             orientation, angle_deg, angle_source = get_orientation(item)
             if APPLY_CAD_ROTATION and angle_deg is not None:
@@ -1240,6 +1394,31 @@ else:
 
     t.Commit()
 
+    show_view = target_view if target_view is not None else trace_view
+    if uidoc is not None and show_view is not None:
+        try:
+            uidoc.ActiveView = show_view
+            visibility_notes.append("Activated view '{}'".format(show_view.Name))
+        except Exception as ex:
+            visibility_notes.append("Could not activate view: {}".format(ex))
+        if placed_ids:
+            try:
+                uidoc.ShowElements(placed_ids[0])
+                visibility_notes.append("Zoomed to first placed gondola")
+            except Exception:
+                try:
+                    from System.Collections.Generic import List as NetList
+                    zoom_ids = NetList[ElementId]()
+                    zoom_ids.Add(placed_ids[0])
+                    uidoc.ShowElements(zoom_ids)
+                    visibility_notes.append("Zoomed to first placed gondola")
+                except Exception as ex:
+                    visibility_notes.append("Could not zoom to gondola: {}".format(ex))
+            try:
+                uidoc.RefreshActiveView()
+            except Exception:
+                pass
+
 
 sep = "=" * 75
 lines = [
@@ -1271,6 +1450,16 @@ lines = [
     "PHASE",
     "  Phase used           : {}".format(phase_info),
     "",
+    "VISIBILITY",
+]
+if visibility_notes:
+    lines.extend(["  " + row for row in visibility_notes])
+else:
+    lines.append("  (no view prepared)")
+if trace_view is not None:
+    lines.append("  Trace view           : {}".format(trace_view.Name))
+lines.extend([
+    "",
     "CAD TRANSFORM",
     "  {}".format(cad_offset_info),
     "",
@@ -1281,7 +1470,7 @@ lines = [
     "  CAD rotation applied : {}".format(APPLY_CAD_ROTATION),
     "",
     "ALL CAD IMPORTS:",
-]
+])
 if all_cad_found:
     lines.extend(all_cad_found)
 else:
