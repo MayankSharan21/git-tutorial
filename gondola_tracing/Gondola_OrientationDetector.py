@@ -152,34 +152,38 @@ def collect_dxf_labels(dxf_path):
         except Exception:
             pass
 
-    # Fallback: blocks that were never reached through an INSERT still
-    # contain store labels on some exported DXFs.
-    seen = {(round(lab["x"], 1), round(lab["y"], 1), lab["text"]) for lab in labels}
+    # Only scan leftover block definitions when modelspace was empty.
+    # Overlay DXFs often keep the proposed selling-floor labels in a
+    # second block. Reading both stacks two families on every bay.
     extra = []
-    print("Scanning leftover block definitions...")
-    for block_def in doc.blocks:
-        try:
-            name = block_def.name
-        except Exception:
-            continue
-        if name.startswith("*"):
-            continue
-        for entity in block_def:
+    if not labels:
+        print("Modelspace had no labels. Scanning leftover block definitions...")
+        seen = set()
+        for block_def in doc.blocks:
             try:
-                if entity.dxftype() not in ("TEXT", "MTEXT", "ATTRIB", "ATTDEF"):
-                    continue
-                label = _as_label(entity)
-                if label is None:
-                    continue
-                key = (round(label["x"], 1), round(label["y"], 1), label["text"])
-                if key in seen:
-                    continue
-                extra.append(label)
-                seen.add(key)
+                name = block_def.name
             except Exception:
-                pass
+                continue
+            if name.startswith("*"):
+                continue
+            for entity in block_def:
+                try:
+                    if entity.dxftype() not in ("TEXT", "MTEXT", "ATTRIB", "ATTDEF"):
+                        continue
+                    label = _as_label(entity)
+                    if label is None:
+                        continue
+                    key = (round(label["x"], 1), round(label["y"], 1), label["text"])
+                    if key in seen:
+                        continue
+                    extra.append(label)
+                    seen.add(key)
+                except Exception:
+                    pass
+        labels.extend(extra)
+    else:
+        print("Skipping leftover block definitions (modelspace already has labels).")
 
-    labels.extend(extra)
     print("Labels collected: {}".format(len(labels)))
     print("")
     return labels
@@ -196,6 +200,9 @@ def extract_with_orientation(dxf_path):
     print("SIZE+TYPE pairs   : {}".format(diagnostics["pairs"]))
     print("Unmatched sizes   : {}".format(len(diagnostics["unmatched_sizes"])))
     print("Unmatched types   : {}".format(len(diagnostics["unmatched_types"])))
+    print("Ignored notes     : {}".format(diagnostics.get("ignored_notes", 0)))
+    print("Dropped proposed  : {}".format(diagnostics.get("dropped_proposed_layer", 0)))
+    print("Dropped overlaps  : {}".format(diagnostics.get("dropped_overlaps", 0)))
     print("")
     return gondolas, diagnostics
 

@@ -5,6 +5,17 @@ Two-step workflow that traces existing-condition gondolas from a store DXF into 
 1. `Gondola_OrientationDetector.py` — run in a VS Code / system Python terminal.
 2. `Dynamo_ExistingGondolaPlacement.py` — paste into a Dynamo Python node and run inside Revit.
 
+## Why the overlay looks like it “does not understand” the plan
+
+The 5 Oct Marrickville PDF is an **existing + proposed overlay**, not a single label set. The tracer was reading both, then Dynamo painted the result onto `5.0 OVERLAY- EXISTING & PROPOSED PLAN`. That is the “lot of overriding”:
+
+1. **Two complete plans in one drawing.** Existing bays are labelled `15F` + `MCA` (and old codes such as `15SHMC`). The proposed selling floor repeats the same bays as complete codes (`15FMCA`, `36WLOA`, `LRD`). Placing both puts two families on one bay.
+2. **Notes are not fixtures.** `DE`, `RD`, `390`, `2x(595x1195)`, `(VM)`, `NO EPF`, `CLADDED SURROUND` sit next to real codes. Treating them as gondolas fills gaps with junk.
+3. **Split words.** `STRAIGHT` / `RAIL`, `FLATDECK` / `W/-SURROUND`, `HOPPER` / `UNIT 2150H` were not joined, so those fixtures were skipped.
+4. **Graphic override on the overlay view.** The previous run targeted the overlay view and the proposed level, so existing-phase families sat on top of proposed families and turned blue.
+
+Run the detector on the **Existing Conditions** DXF only, and run Dynamo on an existing-only view — not the overlay.
+
 ## What was wrong on Marrickville
 
 The 5 Oct 2026 run placed **1526 / 1593** items and every family landed at **0°**.

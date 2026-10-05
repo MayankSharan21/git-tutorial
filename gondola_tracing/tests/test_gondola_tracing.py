@@ -6,14 +6,15 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 
 from gondola_lib import (
-    angle_from_offset,
     apply_orientations,
     build_gondolas,
     canonical_code,
     expand_raw_labels,
     get_orientation,
     identify_text,
+    is_noise_label,
     match_size_type,
+    merge_nearby_phrases,
     normalize_line_angle,
     pick_json_angle,
     snap_line_angle,
@@ -51,6 +52,41 @@ class TextCleanupTests(unittest.TestCase):
     def test_identifies_spaced_pair(self):
         # Known combinations collapse to the catalogue code.
         self.assertEqual(identify_text("15F MCA"), ("FULL", "15FMCA"))
+
+    def test_ignores_overlay_notes(self):
+        for note in ("DE", "RD", "390", "2x(595x1195)", "(VM)", "NO EPF"):
+            self.assertTrue(is_noise_label(note), note)
+            self.assertIsNone(identify_text(note))
+
+    def test_joins_straight_rail(self):
+        merged = merge_nearby_phrases([
+            {"text": "STRAIGHT", "x": 0, "y": 0, "rotation": 0},
+            {"text": "RAIL", "x": 80, "y": 20, "rotation": 0},
+        ])
+        self.assertEqual(len(merged), 1)
+        self.assertEqual(canonical_code(merged[0]["text"]), "STRAIGHT RAIL")
+
+
+class OverlayDedupTests(unittest.TestCase):
+    def test_drops_proposed_copy_of_same_bay(self):
+        raw = [
+            {"text": "15F", "x": 1000, "y": 5200, "rotation": 0, "layer": "EXISTING"},
+            {"text": "MCA", "x": 1000, "y": 5000, "rotation": 0, "layer": "EXISTING"},
+            {"text": "15FMCA", "x": 1010, "y": 5100, "rotation": 0, "layer": "PROPOSED"},
+        ]
+        gondolas, diag = build_gondolas(raw)
+        self.assertEqual(len(gondolas), 1)
+        self.assertGreaterEqual(diag["dropped_overlaps"] + diag["dropped_proposed_layer"], 1)
+        self.assertEqual(gondolas[0]["code"], "15FMCA")
+
+    def test_keeps_end_panel_beside_gondola(self):
+        raw = [
+            {"text": "15FMCA", "x": 0, "y": 0, "rotation": 0},
+            {"text": "15SHMC", "x": 200, "y": 0, "rotation": 0},
+        ]
+        gondolas, _ = build_gondolas(raw)
+        codes = sorted(item["code"] for item in gondolas)
+        self.assertEqual(codes, ["15FMCA", "15SHMC"])
 
 
 class AngleTests(unittest.TestCase):

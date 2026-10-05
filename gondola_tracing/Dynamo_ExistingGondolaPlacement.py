@@ -110,6 +110,7 @@ TYPE_MAP = {
     "36BLCS": ("Wall_Gondola_High_Bay", "36HLCS"),
     "15WLCA": ("Wall_Gondola", "15WLCA"),
     "15WLCS": ("Wall_Gondola", "15WLCS"),
+    "15WLOA": ("Wall_Gondola", "15WLOA"),
     "15WMCA": ("Wall_Gondola", "15WMCA"),
     "15WMCS": ("Wall_Gondola", "15WMCS"),
     "12WMCA": ("Wall_Gondola", "12WMCA"),
@@ -357,7 +358,12 @@ TYPE_MAP = {
     "16_WAY": ("Hotspots", "Racking-16_Way"),
     "T2 TABLE": ("Hotspots", "T2 VM RAIL + DISPLAY ARM (TABLE_T)"),
     "T2 ARM ONLY": ("Hotspots", "T2 TABLE ARM ONLY"),
+    "T2 NO RAIL/ARMS": ("Hotspots", "T2 TABLE ARM ONLY"),
+    "T3 TABLE": ("Hotspots", "T2 VM RAIL + DISPLAY ARM (TABLE_T)"),
     "HANGER TOTEM": ("Hotspots", "HANGER (Bin_240L)"),
+    "27SHLO": ("End_Panel", "27SELO"),
+    "LRD": ("Decks_&_Hopper", "LRD"),
+    "LRD_2": ("Decks_&_Hopper", "LRD_2S"),
 }
 
 
@@ -402,6 +408,10 @@ CODE_ALIASES = {
     "STRAIGHTRAIL": "STRAIGHT RAIL",
     "FLATDECKWS": "FLATDECK W/-SURROUND",
     "FLATDECK WS": "FLATDECK W/-SURROUND",
+    "LRD": "FLATDECK",
+    "LRD_2": "FLATDECK W/-SURROUND",
+    "T2 NO RAIL/ARMS": "T2 NO RAIL/ARMS",
+    "T3 TABLE": "T3 TABLE",
 }
 
 
@@ -780,12 +790,24 @@ if target_level is None:
 
 all_views = list(FilteredElementCollector(doc).OfClass(ViewPlan))
 target_view = None
+
+
+def _is_overlay_view(name):
+    lowered = str(name or "").lower()
+    return "overlay" in lowered or (
+        "existing" in lowered and "proposed" in lowered
+    )
+
+
 for view in all_views:
     try:
         if view.GenLevel is None or view.GenLevel.Id != target_level.Id:
             continue
-        name = str(view.Name).lower()
-        if "existing" in name and "condition" in name:
+        name = str(view.Name)
+        if _is_overlay_view(name):
+            continue
+        lowered = name.lower()
+        if "existing" in lowered and "condition" in lowered:
             target_view = view
             break
     except Exception:
@@ -795,7 +817,10 @@ if target_view is None:
         try:
             if view.GenLevel is None or view.GenLevel.Id != target_level.Id:
                 continue
-            if "existing" in str(view.Name).lower():
+            name = str(view.Name)
+            if _is_overlay_view(name):
+                continue
+            if "existing" in name.lower():
                 target_view = view
                 break
         except Exception:

@@ -91,7 +91,11 @@ FULL_CODES = {
     "HOT SPOT 1500H", "HOT SPOT COOKBOOKS", "HOT SPOT 2100H",
     "HOT SPOT 3000H", "HOT SPOT 3200H", "HOT SPOT 3400H",
     "STRAIGHT RAIL", "6WAY", "16_WAY",
-    "T2 TABLE", "T2 ARM ONLY", "HANGER TOTEM",
+    "T2 TABLE", "T2 ARM ONLY", "T2 NO RAIL/ARMS", "T3 TABLE",
+    "HANGER TOTEM",
+    "15WLOA",
+    "27SHLO",
+    "LRD", "LRD_2",
 }
 
 # Incoming DXF text -> canonical catalogue code.
@@ -111,7 +115,51 @@ CODE_ALIASES = {
     "T2TABLE": "T2 TABLE",
     "T2-TABLE": "T2 TABLE",
     "T2 ARM": "T2 ARM ONLY",
+    "T2 NORAIL/ARMS": "T2 NO RAIL/ARMS",
+    "T2 NO RAIL ARMS": "T2 NO RAIL/ARMS",
+    "T3TABLE": "T3 TABLE",
+    "LRD": "FLATDECK",
+    "LRD2": "FLATDECK W/-SURROUND",
+    "LRD_2": "FLATDECK W/-SURROUND",
+    "15DEMODE": "15DEMO",
+    "18DEMODE": "18DEMO",
+    "21DEMODE": "21DEMO",
+    "27SHLO": "27SHLO",
 }
+
+# Notes printed next to bays. These are not gondolas.
+IGNORE_LABELS = {
+    "DE", "RD", "VM", "PRICE", "MAN", "NO EPF", "NOEPF",
+    "CLADDED SURROUND", "CLADDED", "SURROUND",
+    "FIXTURE FIXED TO FLOOR", "SEAT", "MIRROR", "BR", "DP", "PS",
+    "ENTRY", "EXIT", "FHR", "HYDRANT", "C.H", "CH",
+    "(VM)", "(PRICE)", "(MAN)", "NO VM RAIL",
+    "2X(595X1195)", "390", "WEIGHTS",
+    "SHOWCASE", "CPV UNIT", "ENERGIZER UNIT", "ENERGIZER",
+    "BULK GOODS BOARD", "FIXTURE CLASHES WITH COLUMN",
+    "CUT ON SITE", "NO EPF",
+}
+
+EXISTING_LAYER_HINTS = ("EXIST", "EXG", "AS-BUILT", "ASBUILT", "X-EXIST")
+PROPOSED_LAYER_HINTS = ("PROPOS", "NEW SELL", "NEW-SELL", "SELLING FLOOR", "FUTURE")
+
+PHRASE_JOINS = (
+    (("STRAIGHT", "RAIL"), "STRAIGHT RAIL"),
+    (("FLATDECK", "W/-SURROUND"), "FLATDECK W/-SURROUND"),
+    (("FLATDECK", "W/- SURROUND"), "FLATDECK W/-SURROUND"),
+    (("HOPPER", "UNIT 2150H"), "HOPPER UNIT 2150H"),
+    (("HOT SPOT", "1500H"), "HOT SPOT 1500H"),
+    (("HOT SPOT", "2100H"), "HOT SPOT 2100H"),
+    (("HOT SPOT", "3000H"), "HOT SPOT 3000H"),
+    (("HOT SPOT", "3200H"), "HOT SPOT 3200H"),
+    (("HOT SPOT", "3400H"), "HOT SPOT 3400H"),
+    (("HOT SPOT", "COOKBOOKS"), "HOT SPOT COOKBOOKS"),
+    (("T2", "NO RAIL/ARMS"), "T2 NO RAIL/ARMS"),
+    (("T2 NO", "RAIL/ARMS"), "T2 NO RAIL/ARMS"),
+    (("T3", "TABLE"), "T3 TABLE"),
+)
+
+OVERLAP_DEDUP_MM = 350.0
 
 # Typical bay centres along a gondola run, millimetres.
 BAY_SPACINGS_MM = (1200.0, 1500.0, 1800.0, 2100.0, 900.0, 2400.0, 600.0)
@@ -323,6 +371,88 @@ def pick_json_angle(item, use_json_angle=True):
 # Label identification
 # ---------------------------------------------------------------------------
 
+def is_noise_label(text):
+    """True for dimension / VM / overlay notes that are not fixtures."""
+    raw = normalize_code(text)
+    if not raw:
+        return True
+    compact = compact_code(raw)
+    if raw in IGNORE_LABELS or compact in IGNORE_LABELS:
+        return True
+    if re.fullmatch(r"\d+(\.\d+)?", raw):
+        return True
+    if re.fullmatch(r"2X\([^)]+\)", compact):
+        return True
+    if raw.startswith("FSD-") or raw.startswith("FSD "):
+        return True
+    if "MODS VM" in raw or raw.endswith(" SQM") or raw.endswith(" M²"):
+        return True
+    return False
+
+
+def layer_bucket(layer):
+    name = str(layer or "").upper()
+    if any(hint in name for hint in EXISTING_LAYER_HINTS):
+        return "existing"
+    if any(hint in name for hint in PROPOSED_LAYER_HINTS):
+        return "proposed"
+    return "unknown"
+
+
+def filter_proposed_layers(raw_labels):
+    """
+    Overlay DXFs often contain existing AND proposed text.
+    If both layer families are present, keep existing (+ untagged).
+    """
+    buckets = defaultdict(list)
+    for label in raw_labels:
+        buckets[layer_bucket(label.get("layer", ""))].append(label)
+    if buckets["existing"] and buckets["proposed"]:
+        kept = buckets["existing"] + buckets["unknown"]
+        return kept, {
+            "dropped_proposed_layer": len(buckets["proposed"]),
+            "kept_existing_layer": len(buckets["existing"]),
+        }
+    return list(raw_labels), {
+        "dropped_proposed_layer": 0,
+        "kept_existing_layer": len(raw_labels),
+    }
+
+
+def merge_nearby_phrases(raw_labels, dist=550.0):
+    """Join split notes such as STRAIGHT + RAIL or FLATDECK + W/-SURROUND."""
+    used = set()
+    merged = []
+    for i, first in enumerate(raw_labels):
+        if i in used:
+            continue
+        first_text = normalize_code(first.get("text", ""))
+        joined = False
+        for j, second in enumerate(raw_labels):
+            if j <= i or j in used:
+                continue
+            if hypot(first["x"] - second["x"], first["y"] - second["y"]) > dist:
+                continue
+            second_text = normalize_code(second.get("text", ""))
+            for (left, right), canon in PHRASE_JOINS:
+                pair = {first_text, second_text}
+                if pair == {left, right}:
+                    record = dict(first)
+                    record["text"] = canon
+                    record["x"] = (first["x"] + second["x"]) / 2.0
+                    record["y"] = (first["y"] + second["y"]) / 2.0
+                    merged.append(record)
+                    used.add(i)
+                    used.add(j)
+                    joined = True
+                    break
+            if joined:
+                break
+        if not joined:
+            merged.append(first)
+    return merged
+
+
 def identify_text(text):
     """
     Return a classification tuple:
@@ -334,7 +464,7 @@ def identify_text(text):
         None
     """
     raw = normalize_code(text)
-    if not raw:
+    if not raw or is_noise_label(raw):
         return None
 
     canon = canonical_code(raw)
@@ -683,13 +813,51 @@ def apply_orientations(gondolas):
     return gondolas
 
 
+def _same_fixture(left, right):
+    return compact_code(left.get("code", "")) == compact_code(right.get("code", ""))
+
+
+def detection_rank(gondola):
+    # Existing drawings use stacked SIZE+TYPE. Proposed drawings use
+    # a single complete code. Prefer the pair when both sit on one bay.
+    return 0 if gondola.get("detection") == "SIZE_TYPE" else 1
+
+
+def dedup_overlapping_gondolas(gondolas, dist=OVERLAP_DEDUP_MM):
+    """
+    Drop a second family when existing and proposed labels name the
+    same fixture in the same bay. Keep end panels next to gondolas.
+    """
+    ordered = sorted(
+        gondolas,
+        key=lambda item: (detection_rank(item), item.get("x", 0), item.get("y", 0)),
+    )
+    kept = []
+    dropped = 0
+    for item in ordered:
+        clash = False
+        for other in kept:
+            if hypot(item["x"] - other["x"], item["y"] - other["y"]) > dist:
+                continue
+            if _same_fixture(item, other):
+                clash = True
+                break
+        if clash:
+            dropped += 1
+            continue
+        kept.append(item)
+    return kept, dropped
+
+
 def build_gondolas(raw_labels):
     """
     Full detector pipeline from raw DXF-like labels.
 
     Returns (gondolas, diagnostics).
     """
-    expanded = expand_raw_labels(raw_labels)
+    filtered, layer_info = filter_proposed_layers(raw_labels)
+    merged = merge_nearby_phrases(filtered)
+    expanded = expand_raw_labels(merged)
     expanded = dedup_labels(expanded)
 
     pairs, used_sizes, used_types, sizes, types = match_size_type(expanded)
@@ -699,6 +867,7 @@ def build_gondolas(raw_labels):
         if label["kind"] == "FULL":
             gondolas.append(make_full_gondola(label))
 
+    gondolas, dropped_overlaps = dedup_overlapping_gondolas(gondolas)
     gondolas = apply_orientations(gondolas)
 
     unmatched_sizes = [
@@ -717,6 +886,11 @@ def build_gondolas(raw_labels):
         "pairs": len(pairs),
         "unmatched_sizes": unmatched_sizes,
         "unmatched_types": unmatched_types,
+        "dropped_proposed_layer": layer_info["dropped_proposed_layer"],
+        "dropped_overlaps": dropped_overlaps,
+        "ignored_notes": sum(
+            1 for label in raw_labels if is_noise_label(label.get("text", ""))
+        ),
         "total": len(gondolas),
     }
     return gondolas, diagnostics
