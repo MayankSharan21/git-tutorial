@@ -1,7 +1,7 @@
 # Dynamo_ExistingGondolaPlacement
 # Revit 2025 / Dynamo CPython3 compatible
 #
-# Version 2026-10-05r-cad-axis
+# Version 2026-10-05s-run-axis
 # Original File2 placement (CAD offset always on). Only orientation
 # reading and Existing-view lock are changed.
 #
@@ -77,7 +77,7 @@ JSON_PATH = r"C:\Users\msharan\OneDrive - Kmart Australia Limited\Desktop\Stores
 
 LEVEL_NAME = "00-GROUND"
 VIEW_NAME = "1.0 EXISTING CONDITIONS - GROUND"
-SCRIPT_VERSION = "2026-10-05r-cad-axis"
+SCRIPT_VERSION = "2026-10-05s-run-axis"
 
 # Partial CAD import name.
 # Leave "" to automatically use the first suitable CAD import.
@@ -870,7 +870,7 @@ def plan_extent(length, depth, axis):
 def get_bay_dims_ft(g):
 
     """
-    Drawn bay length and depth in feet, long side first, or None.
+    Drawn bay length along the axis and depth across it, in feet.
 
     The detector writes bay_length and bay_depth in mm from the gondola
     it fitted in the CAD. A run drawn as one rectangle only gives the
@@ -895,9 +895,6 @@ def get_bay_dims_ft(g):
 
     if length is None:
         return (None, depth * MM_TO_FT)
-
-    if depth > length:
-        length, depth = depth, length
 
     return (
         length * MM_TO_FT,

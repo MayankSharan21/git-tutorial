@@ -44,6 +44,8 @@ The 5 Oct 2026 run placed **1526 / 1593** items and every family landed at **0°
   - `CAD_DEPTH` — long sides only, which is what a run drawn as one long outline gives. Exact axis, exact centre across the bay, label position along it.
   - `CAD_EDGE` — direction only. Nothing is moved.
 - To find that geometry it explodes nested blocks, measures distance to the whole edge rather than to its midpoint, keeps edges up to 40 m, and treats inner parallel lines as shelves across the bay but as bay divisions along it.
+- Of the two directions a cell could run, it takes the one whose sides **run further**. The sides of a run are drawn as one line past every bay; the divisions between bays are a single bay long. Picking the narrower way across instead is what turned a 1200 wide by 1500 deep run 90°.
+- `bay_length` is measured along the axis and `bay_depth` across it, as drawn. They are not sorted, because a run can be deeper than it is long.
 - If the labels are in a block and the outlines in modelspace, their coordinates look unrelated. The detector uses the block's own INSERT as the exact transform between the two rather than guessing an offset, and says so when it does.
 - Dynamo measures each placed footprint and turns it onto the bay axis about the footprint centre, then centres it on the bay. Rotating about the insertion point swung bodies off their bays, because these families are not centred on their origin.
 - Matches SIZE+TYPE with mutual nearest-neighbour and a ~700 mm stack window so adjacent 1200 mm bays are not paired.
@@ -65,7 +67,7 @@ The 5 Oct 2026 run placed **1526 / 1593** items and every family landed at **0°
 
 ## How to run
 
-1. Replace **both** files. Dynamo must report `2026-10-05r-cad-axis`. Re-run the detector (leftover named blocks, mutual-nearest pairing, XY = bay centre) so it writes `gondola_data_Marrickville_New4.json`, then run Dynamo. Do not reuse New2 / New3.
+1. Replace **both** files. Dynamo must report `2026-10-05s-run-axis`. Re-run the detector (leftover named blocks, mutual-nearest pairing, XY = bay centre) so it writes `gondola_data_Marrickville_New4.json`, then run Dynamo. Do not reuse New2 / New3.
 2. Copy only `Gondola_OrientationDetector.py` into the Tracing folder. It is standalone — an old `gondola_lib.py` in that folder is ignored.
 3. Edit `DXF_FILE_PATH` and `OUTPUT_JSON` at the top of `Gondola_OrientationDetector.py`. Use the Existing Conditions GROUND DXF.
 4. `pip install ezdxf` if needed, then run the detector.

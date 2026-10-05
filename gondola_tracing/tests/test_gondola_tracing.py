@@ -518,6 +518,44 @@ class BayFitTests(unittest.TestCase):
         fit = bay_fit_from_segments((8800, 5120), segs)
         self.assertAlmostEqual(fit["axis"], 0.0, delta=0.5)
 
+    def test_run_direction_beats_the_narrower_way_across(self):
+        # Marrickville's V6 failure. A run of 1200 bays that is 1500
+        # deep measures *wider* along the run than across it, so
+        # picking the narrower way across turned the bay 90 degrees.
+        # The sides of a run are drawn as one line past every bay,
+        # while the divisions between bays are a single bay long.
+        segs = [
+            (0.0, 0.0, 7200.0, 0.0),
+            (0.0, 1500.0, 7200.0, 1500.0),
+        ]
+        for x in range(0, 7201, 1200):
+            segs.append((float(x), 0.0, float(x), 1500.0))
+
+        fit = bay_fit_from_segments((1800.0, 750.0), segs)
+        self.assertEqual(fit["fit"], "RECTANGLE")
+        self.assertAlmostEqual(fit["axis"], 0.0, delta=0.5)
+        self.assertAlmostEqual(fit["x"], 1800.0, delta=1.0)
+        self.assertAlmostEqual(fit["y"], 750.0, delta=1.0)
+        self.assertAlmostEqual(fit["length"], 1200.0, delta=1.0)
+        self.assertAlmostEqual(fit["depth"], 1500.0, delta=1.0)
+
+    def test_centre_line_of_a_double_sided_run(self):
+        # The label pair straddles the bay centre line, so a line runs
+        # right through the query point. The bay is still 930 deep.
+        segs = [
+            (0.0, 0.0, 7200.0, 0.0),
+            (0.0, 465.0, 7200.0, 465.0),
+            (0.0, 930.0, 7200.0, 930.0),
+        ]
+        for x in range(0, 7201, 1200):
+            segs.append((float(x), 0.0, float(x), 930.0))
+
+        fit = bay_fit_from_segments((1800.0, 465.0), segs)
+        self.assertAlmostEqual(fit["axis"], 0.0, delta=0.5)
+        self.assertAlmostEqual(fit["x"], 1800.0, delta=1.0)
+        self.assertAlmostEqual(fit["y"], 465.0, delta=1.0)
+        self.assertAlmostEqual(fit["length"], 1200.0, delta=1.0)
+
     def test_no_geometry_at_all(self):
         self.assertIsNone(bay_fit_from_segments((0, 0), []))
         self.assertIsNone(bay_fit_from_segments((90000, 90000), [(0, 0, 1200, 0)]))
@@ -572,10 +610,12 @@ class BayDimensionAlignmentTests(unittest.TestCase):
         self.assertAlmostEqual(x, 2100.0 / math.sqrt(2.0))
         self.assertAlmostEqual(y, 2100.0 / math.sqrt(2.0))
 
-    def test_bay_dims_put_the_long_side_first(self):
+    def test_bay_dims_are_taken_as_drawn(self):
+        # Length is along the bay axis even when the bay is deeper than
+        # it is long, which a 1200 wide by 1500 deep run is.
         self.assertEqual(
-            bay_dims_from_item({"bay_length": 900.0, "bay_depth": 1200.0}),
-            (1200.0, 900.0),
+            bay_dims_from_item({"bay_length": 1200.0, "bay_depth": 1500.0}),
+            (1200.0, 1500.0),
         )
         self.assertIsNone(bay_dims_from_item({"bay_length": 1200.0}))
         self.assertIsNone(bay_dims_from_item({}))
@@ -618,6 +658,16 @@ class BayDimensionAlignmentTests(unittest.TestCase):
         )
         self.assertEqual(
             bay_alignment_delta(1000.0, 1500.0, 90.0, 1200.0, 1000.0), 0.0
+        )
+
+    def test_a_bay_deeper_than_it_is_long_does_not_turn_the_family(self):
+        # A 1200 wide by 1500 deep run: the family's long side is
+        # across the bay, not along it, and must stay there.
+        self.assertEqual(
+            bay_alignment_delta(1200.0, 1500.0, 0.0, 1200.0, 1500.0), 0.0
+        )
+        self.assertEqual(
+            bay_alignment_delta(1500.0, 1200.0, 0.0, 1200.0, 1500.0), 90.0
         )
 
     def test_square_box_is_left_alone_even_with_bay_dims(self):
