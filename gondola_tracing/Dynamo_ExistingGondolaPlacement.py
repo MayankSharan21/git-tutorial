@@ -1,7 +1,7 @@
 # Dynamo_ExistingGondolaPlacement
 # Revit 2025 / Dynamo CPython3 compatible
 #
-# Version 2026-10-05g-keep-existing-view
+# Version 2026-10-05h-cad-space
 #
 # Places existing-condition gondolas from the JSON written by
 # Gondola_OrientationDetector.py.
@@ -70,7 +70,7 @@ MM_TO_FT = 1.0 / 304.8
 
 # Hard rule: place only on Existing. Never Proposed, selling-floor, or overlay.
 EXISTING_ONLY = True
-SCRIPT_VERSION = "2026-10-05g-keep-existing-view"
+SCRIPT_VERSION = "2026-10-05h-cad-space"
 TRACE_NOTE_PREFIX = "EG:"
 
 USE_JSON_ANGLE = True
@@ -713,6 +713,27 @@ def choose_existing_placement(views, level_names, preferred_level="", preferred_
 # JSON
 # ---------------------------------------------------------------------------
 
+def should_apply_cad_translation(xs, cad_x_mm, pad_mm=80000.0):
+    if not xs:
+        return True
+    try:
+        cad_x_mm = float(cad_x_mm)
+    except Exception:
+        return True
+    if abs(cad_x_mm) < 1000.0:
+        return abs(cad_x_mm) >= 1.0
+    values = []
+    for x in xs:
+        try:
+            values.append(float(x))
+        except Exception:
+            continue
+    if not values:
+        return True
+    min_x = min(values)
+    return not (cad_x_mm - pad_mm <= min_x <= cad_x_mm + 250000.0)
+
+
 def load_gondola_items(data):
     """Accept {gondolas: [...]} or a bare list from older detector runs."""
     if isinstance(data, list):
@@ -829,6 +850,24 @@ for imp in all_imports:
             cad_offset_info = cad_offset_info_text
     except Exception as ex:
         all_cad_found.append("    CAD ERROR: {}".format(str(ex)))
+
+json_xs = []
+for item in gondolas:
+    try:
+        json_xs.append(float(item.get("x", 0)))
+    except Exception:
+        pass
+json_x_min = min(json_xs) if json_xs else 0.0
+json_x_max = max(json_xs) if json_xs else 0.0
+cad_offset_mm_x = cad_offset_x * 304.8
+apply_cad_now = bool(APPLY_CAD_TRANSLATION) and should_apply_cad_translation(
+    json_xs, cad_offset_mm_x
+)
+if APPLY_CAD_TRANSLATION and not apply_cad_now:
+    cad_offset_info = (
+        "{} | translation skipped (JSON already in CAD space, "
+        "x={:.0f}..{:.0f} mm vs CAD {:.0f} mm)"
+    ).format(cad_offset_info, json_x_min, json_x_max, cad_offset_mm_x)
 
 
 # ---------------------------------------------------------------------------
@@ -1361,7 +1400,7 @@ else:
                 x_rot = x_local_ft
                 y_rot = y_local_ft
 
-            if APPLY_CAD_TRANSLATION:
+            if apply_cad_now:
                 x_ft = x_rot + cad_offset_x
                 y_ft = y_rot + cad_offset_y
             else:
@@ -1557,7 +1596,9 @@ lines.extend([
     "  JSON angle enabled   : {}".format(USE_JSON_ANGLE),
     "  Angle sign           : {}".format(ANGLE_SIGN),
     "  Angle offset         : {:.3f}°".format(ANGLE_OFFSET_DEG),
+    "  CAD translation used : {}".format(apply_cad_now),
     "  CAD rotation applied : {}".format(APPLY_CAD_ROTATION),
+    "  JSON x range         : {:.0f} .. {:.0f} mm".format(json_x_min, json_x_max),
     "",
     "ALL CAD IMPORTS:",
 ])

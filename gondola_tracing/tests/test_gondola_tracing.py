@@ -28,6 +28,7 @@ from gondola_lib import (
     merge_nearby_phrases,
     normalize_line_angle,
     pick_json_angle,
+    should_apply_cad_translation,
     should_scan_leftover,
     snap_line_angle,
     strip_mtext_codes,
@@ -262,6 +263,12 @@ class ExistingOnlyScopeTests(unittest.TestCase):
         self.assertEqual(load_gondola_items({"gondolas": [{"code": "A"}]}), [{"code": "A"}])
         self.assertEqual(load_gondola_items([{"code": "B"}]), [{"code": "B"}])
         self.assertEqual(load_gondola_items({"total": 0}), [])
+
+    def test_skips_cad_offset_when_json_already_in_world_space(self):
+        # Marrickville leftover labels are already near the CAD link origin.
+        xs = [275697, 349405, 383050]
+        self.assertFalse(should_apply_cad_translation(xs, 274964))
+        self.assertTrue(should_apply_cad_translation([733, 38000, 74000], 274964))
 
 
 class OverlayDedupTests(unittest.TestCase):

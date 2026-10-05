@@ -646,6 +646,36 @@ def is_layout_block(name):
     )
 
 
+def should_apply_cad_translation(xs, cad_x_mm, pad_mm=80000.0):
+    """
+    False when JSON XY is already in the same space as the Revit CAD link.
+
+    Marrickville leftover / XREF labels come out near 275000 mm. Adding
+    the Existing Conditions link offset (also ~275000 mm) again draws a
+    second store to the right of the CAD.
+    """
+    if not xs:
+        return True
+    try:
+        cad_x_mm = float(cad_x_mm)
+    except (TypeError, ValueError):
+        return True
+    if abs(cad_x_mm) < 1000.0:
+        return abs(cad_x_mm) >= 1.0
+
+    values = []
+    for x in xs:
+        try:
+            values.append(float(x))
+        except (TypeError, ValueError):
+            continue
+    if not values:
+        return True
+
+    min_x = min(values)
+    return not (cad_x_mm - pad_mm <= min_x <= cad_x_mm + 250000.0)
+
+
 def load_gondola_items(data):
     """Accept {gondolas: [...]} or a bare list from older detector runs."""
     if isinstance(data, list):
