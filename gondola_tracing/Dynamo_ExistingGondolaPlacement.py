@@ -1,7 +1,7 @@
 # Dynamo_ExistingGondolaPlacement
 # Revit 2025 / Dynamo CPython3 compatible
 #
-# Version 2026-10-05n-fit-bays
+# Version 2026-10-05p-bay-fit
 # Original File2 placement (CAD offset always on). Only orientation
 # reading and Existing-view lock are changed.
 #
@@ -75,7 +75,7 @@ JSON_PATH = r"C:\Users\msharan\OneDrive - Kmart Australia Limited\Desktop\Stores
 
 LEVEL_NAME = "00-GROUND"
 VIEW_NAME = "1.0 EXISTING CONDITIONS - GROUND"
-SCRIPT_VERSION = "2026-10-05n-fit-bays"
+SCRIPT_VERSION = "2026-10-05p-bay-fit"
 
 # Partial CAD import name.
 # Leave "" to automatically use the first suitable CAD import.
@@ -844,6 +844,141 @@ def footprint_alignment_delta(width, depth, bay_axis):
     return delta
 
 
+def plan_extent(length, depth, axis):
+
+    """
+    Plan extents, in world axes, of a length x depth rectangle turned
+    to `axis`. This is what Revit's bounding box should measure once a
+    footprint follows the bay.
+    """
+
+    rad = math.radians(
+        fold_line_angle(axis)
+    )
+
+    cos_a = abs(math.cos(rad))
+    sin_a = abs(math.sin(rad))
+
+    return (
+        length * cos_a + depth * sin_a,
+        length * sin_a + depth * cos_a
+    )
+
+
+def get_bay_dims_ft(g):
+
+    """
+    Drawn bay length and depth in feet, long side first, or None.
+
+    The detector writes bay_length and bay_depth in mm when it managed
+    to fit the gondola rectangle in the CAD.
+    """
+
+    try:
+        length = float(g.get("bay_length"))
+        depth = float(g.get("bay_depth"))
+    except Exception:
+        return None
+
+    if length <= 0.0 or depth <= 0.0:
+        return None
+
+    if depth > length:
+        length, depth = depth, length
+
+    return (
+        length * MM_TO_FT,
+        depth * MM_TO_FT
+    )
+
+
+def bay_alignment_delta(width, depth, bay_axis, bay_dims=None):
+
+    """
+    Degrees to turn a placed footprint onto the bay it was traced from.
+
+    Without the drawn bay this is just the long-axis turn. With it, the
+    quarter turn either side is scored against the extents the bay would
+    occupy, which survives a family whose box is bigger than its
+    footprint: a 90 degree error swaps the extents and loses badly.
+    """
+
+    delta = footprint_alignment_delta(
+        width,
+        depth,
+        bay_axis
+    )
+
+    if not bay_dims:
+        return delta
+
+    try:
+        width = float(width)
+        depth = float(depth)
+    except Exception:
+        return delta
+
+    body_long = max(width, depth)
+    body_short = min(width, depth)
+
+    if body_long - body_short < 1e-9:
+        return delta
+
+    body_axis = 0.0 if width >= depth else 90.0
+
+    want_x, want_y = plan_extent(
+        bay_dims[0],
+        bay_dims[1],
+        bay_axis
+    )
+
+    best = delta
+    best_score = None
+
+    for candidate in (delta, delta + 90.0, delta - 90.0):
+
+        if candidate > 90.0 or candidate < -90.0:
+            continue
+
+        got_x, got_y = plan_extent(
+            body_long,
+            body_short,
+            body_axis + candidate
+        )
+
+        score = (
+            abs(got_x - want_x)
+            + abs(got_y - want_y)
+        )
+
+        if best_score is None or score < best_score - 1e-9:
+            best = candidate
+            best_score = score
+
+    return best
+
+
+def footprint_fit_error_mm(width, depth, bay_axis, bay_dims):
+
+    """
+    How far a placed footprint's extents miss the drawn bay, in mm.
+    """
+
+    if not bay_dims:
+        return None
+
+    want_x, want_y = plan_extent(
+        bay_dims[0],
+        bay_dims[1],
+        bay_axis
+    )
+
+    return (
+        (width - want_x) / MM_TO_FT,
+        (depth - want_y) / MM_TO_FT
+    )
+
+
 def instance_plan_box(instance):
 
     """
@@ -869,11 +1004,16 @@ def instance_plan_box(instance):
         return None
 
 
-def align_instance_to_bay(doc, instance, target, bay_axis):
+def align_instance_to_bay(doc, instance, target, bay_axis, bay_dims=None):
 
     """
     Turn the placed footprint onto the bay axis, then centre it on
     the bay point. Returns a short note for the report.
+
+    When the detector measured the drawn bay, bay_dims decides the turn
+    and the note reports how far the footprint still misses it, so a
+    family of the wrong size shows up in the report rather than on the
+    drawing.
     """
 
     box = instance_plan_box(instance)
@@ -904,10 +1044,11 @@ def align_instance_to_bay(doc, instance, target, bay_axis):
 
     min_x, min_y, max_x, max_y = box
 
-    delta = footprint_alignment_delta(
+    delta = bay_alignment_delta(
         max_x - min_x,
         max_y - min_y,
-        bay_axis
+        bay_axis,
+        bay_dims
     )
 
     rotated = False
@@ -965,12 +1106,30 @@ def align_instance_to_bay(doc, instance, target, bay_axis):
         except Exception:
             pass
 
+    fit = footprint_fit_error_mm(
+        max_x - min_x,
+        max_y - min_y,
+        bay_axis,
+        bay_dims
+    )
+
+    if fit is None:
+        fit_note = ""
+    else:
+        fit_note = (
+            " fit=({:+.0f},{:+.0f}) mm".format(
+                fit[0],
+                fit[1]
+            )
+        )
+
     return (
-        "axis={:.1f}° turned={:.1f}° centred=({:.0f},{:.0f}) mm".format(
+        "axis={:.1f}° turned={:.1f}° centred=({:.0f},{:.0f}) mm{}".format(
             fold_line_angle(bay_axis),
             delta if rotated else 0.0,
             shift_x * 304.8 if moved else 0.0,
-            shift_y * 304.8 if moved else 0.0
+            shift_y * 304.8 if moved else 0.0,
+            fit_note
         )
     )
 
@@ -1745,6 +1904,7 @@ skipped = []
 wall_placed = []
 orientation_report = []
 alignment_notes = []
+on_cad_bay = 0
 
 
 for g in gondolas:
@@ -1971,22 +2131,39 @@ for g in gondolas:
         #
         # This needs no assumption about family origin or which way a
         # type is drawn at 0 degrees.
+        #
+        # bay_length / bay_depth come from the gondola rectangle the
+        # detector fitted in the CAD, and settle which quarter turn
+        # lands the footprint on it.
 
         bay_axis = get_bay_axis(g)
+        bay_dims = get_bay_dims_ft(g)
 
         align_note = align_instance_to_bay(
             doc,
             instance,
             point,
-            bay_axis
+            bay_axis,
+            bay_dims
         )
+
+        source = str(
+            g.get(
+                "orientation_source",
+                ""
+            )
+        ).strip()
+
+        if source == "CAD_RECTANGLE":
+            on_cad_bay += 1
 
         if align_note:
 
             alignment_notes.append(
-                "{} | {}".format(
+                "{} | {}{}".format(
                     code,
-                    align_note
+                    align_note,
+                    " [CAD bay]" if source == "CAD_RECTANGLE" else ""
                 )
             )
 
@@ -2166,6 +2343,11 @@ lines = [
 
     "  Footprint aligned    : {} of {}".format(
         len(alignment_notes),
+        len(placed)
+    ),
+
+    "  On a measured CAD bay: {} of {}".format(
+        on_cad_bay,
         len(placed)
     ),
 

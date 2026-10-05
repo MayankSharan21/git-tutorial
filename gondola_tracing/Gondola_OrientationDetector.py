@@ -1,7 +1,7 @@
 # Gondola_OrientationDetector.py
 #
 # Original File1 collector (the run that filled most bays).
-# Version 2026-10-05n-fit-bays
+# Version 2026-10-05p-bay-fit
 #
 # Only orientation is corrected after collect:
 #   leftover named blocks + modelspace TEXT, MATCH_DIST 1500,
@@ -72,7 +72,7 @@ except Exception:
 DXF_FILE_PATH = r"C:\Users\msharan\OneDrive - Kmart Australia Limited\Desktop\Stores Foundry\PPT , Requirements, Demo videos, Pics\1131 Marrickville-Existing plan trace exercise_2 - Floor Plan - 1-0 EXISTING CONDITIONS - GROUND.dxf"
 
 OUTPUT_JSON = r"C:\Users\msharan\OneDrive - Kmart Australia Limited\Desktop\Stores Foundry\Tracing\json\gondola_data_Marrickville_New4.json"
-SCRIPT_VERSION = "2026-10-05n-fit-bays"
+SCRIPT_VERSION = "2026-10-05p-bay-fit"
 
 
 # ============================================================
@@ -655,6 +655,230 @@ def get_angle_from_offset(dx, dy):
 
 
 # ============================================================
+# BAY RECTANGLE FROM THE DRAWN OUTLINES
+# ============================================================
+
+BAY_MIN_SIDE_MM = 250.0
+BAY_MAX_SIDE_MM = 4200.0
+BAY_SEARCH_MM = 1600.0
+
+
+def segment_length(seg):
+    return math.sqrt(
+        (seg[2] - seg[0]) ** 2 +
+        (seg[3] - seg[1]) ** 2
+    )
+
+
+def segment_angle(seg):
+    return normalize_line_angle(
+        math.degrees(
+            math.atan2(
+                seg[3] - seg[1],
+                seg[2] - seg[0]
+            )
+        )
+    )
+
+
+def line_angle_delta(a, b):
+    delta = abs(
+        normalize_line_angle(a) -
+        normalize_line_angle(b)
+    )
+    if delta > 90.0:
+        delta = 180.0 - delta
+    return delta
+
+
+class SegmentIndex(object):
+
+    """
+    Grid index so each label only tests nearby outline segments.
+    """
+
+    def __init__(self, segments, cell=BAY_SEARCH_MM):
+        self.cell = float(cell)
+        self.cells = {}
+        for seg in segments:
+            mid_x = (seg[0] + seg[2]) / 2.0
+            mid_y = (seg[1] + seg[3]) / 2.0
+            key = (
+                int(math.floor(mid_x / self.cell)),
+                int(math.floor(mid_y / self.cell))
+            )
+            self.cells.setdefault(key, []).append(seg)
+
+    def near(self, x, y):
+        gx = int(math.floor(float(x) / self.cell))
+        gy = int(math.floor(float(y) / self.cell))
+        out = []
+        for dx in (-1, 0, 1):
+            for dy in (-1, 0, 1):
+                out.extend(
+                    self.cells.get((gx + dx, gy + dy), ())
+                )
+        return out
+
+
+def _dominant_angle(segments):
+    buckets = []
+    for seg in segments:
+        length = segment_length(seg)
+        if length <= 0.0:
+            continue
+        ang = segment_angle(seg)
+        placed = False
+        for bucket in buckets:
+            if line_angle_delta(bucket["angle"], ang) <= 8.0:
+                bucket["weight"] += length
+                bucket["angles"].append((ang, length))
+                placed = True
+                break
+        if not placed:
+            buckets.append({
+                "angle": ang,
+                "weight": length,
+                "angles": [(ang, length)]
+            })
+    if not buckets:
+        return None
+    buckets.sort(key=lambda b: b["weight"], reverse=True)
+    best = buckets[0]
+    x = sum(
+        math.cos(math.radians(2.0 * a)) * w
+        for a, w in best["angles"]
+    )
+    y = sum(
+        math.sin(math.radians(2.0 * a)) * w
+        for a, w in best["angles"]
+    )
+    return normalize_line_angle(
+        math.degrees(math.atan2(y, x)) / 2.0
+    )
+
+
+def _straddling_extent(point, segments, edge_dir_deg, measure_dir_deg):
+    edge_rad = math.radians(edge_dir_deg)
+    ux, uy = math.cos(edge_rad), math.sin(edge_rad)
+    measure_rad = math.radians(measure_dir_deg)
+    nx, ny = math.cos(measure_rad), math.sin(measure_rad)
+    px, py = point
+
+    low = None
+    high = None
+
+    for seg in segments:
+        mid_x = (seg[0] + seg[2]) / 2.0
+        mid_y = (seg[1] + seg[3]) / 2.0
+        offset = (mid_x - px) * nx + (mid_y - py) * ny
+        extent = abs(
+            (seg[2] - seg[0]) * ux +
+            (seg[3] - seg[1]) * uy
+        )
+        if extent < BAY_MIN_SIDE_MM * 0.6:
+            continue
+        centre_along = (mid_x - px) * ux + (mid_y - py) * uy
+        if abs(centre_along) > extent / 2.0 + 200.0:
+            continue
+        if offset <= 0.0:
+            if low is None or offset > low:
+                low = offset
+        else:
+            if high is None or offset < high:
+                high = offset
+
+    if low is None or high is None:
+        return None
+
+    width = high - low
+
+    if not (BAY_MIN_SIDE_MM <= width <= BAY_MAX_SIDE_MM):
+        return None
+
+    return low, high, width
+
+
+def bay_rect_from_segments(point, segments, search_mm=BAY_SEARCH_MM):
+
+    """
+    Fit the drawn gondola rectangle that holds a label.
+
+    Returns centre, length, depth and long-axis angle, or None.
+    """
+
+    px, py = float(point[0]), float(point[1])
+
+    near = []
+    for seg in segments or ():
+        length = segment_length(seg)
+        if length < BAY_MIN_SIDE_MM * 0.6 or length > BAY_MAX_SIDE_MM:
+            continue
+        mid_x = (seg[0] + seg[2]) / 2.0
+        mid_y = (seg[1] + seg[3]) / 2.0
+        if abs(mid_x - px) > search_mm or abs(mid_y - py) > search_mm:
+            continue
+        near.append(seg)
+
+    if len(near) < 2:
+        return None
+
+    axis = _dominant_angle(near)
+
+    if axis is None:
+        return None
+
+    across_dir = normalize_line_angle(axis + 90.0)
+
+    parallel = [
+        s for s in near
+        if line_angle_delta(segment_angle(s), axis) <= 12.0
+    ]
+    perpendicular = [
+        s for s in near
+        if line_angle_delta(segment_angle(s), across_dir) <= 12.0
+    ]
+
+    if not parallel or not perpendicular:
+        return None
+
+    across = _straddling_extent((px, py), parallel, axis, across_dir)
+    along = _straddling_extent((px, py), perpendicular, across_dir, axis)
+
+    if across is None or along is None:
+        return None
+
+    rad = math.radians(axis)
+    ux, uy = math.cos(rad), math.sin(rad)
+    across_rad = math.radians(across_dir)
+    nx, ny = math.cos(across_rad), math.sin(across_rad)
+
+    across_mid = (across[0] + across[1]) / 2.0
+    along_mid = (along[0] + along[1]) / 2.0
+
+    cx = px + nx * across_mid + ux * along_mid
+    cy = py + ny * across_mid + uy * along_mid
+
+    side_along = along[2]
+    side_across = across[2]
+
+    if side_along >= side_across:
+        long_axis = axis
+        length, depth = side_along, side_across
+    else:
+        long_axis = across_dir
+        length, depth = side_across, side_along
+
+    return {
+        "x": round(cx, 3),
+        "y": round(cy, 3),
+        "length": round(length, 1),
+        "depth": round(depth, 1),
+        "axis": round(long_axis, 3),
+    }
+
+
+# ============================================================
 # CREATE COMPLETE CODE ITEM
 # ============================================================
 
@@ -719,6 +943,7 @@ def extract_with_orientation(dxf_path):
     size_texts = []
     type_texts = []
     full_code_gondolas = []
+    bay_segments = []
 
     print("Loading DXF file...")
     print(dxf_path)
@@ -736,7 +961,99 @@ def extract_with_orientation(dxf_path):
     # PROCESS ENTITY
     # ========================================================
 
+    def collect_bay_segments(entity):
+        """
+        Keep the drawn gondola outlines, in the same coordinates as the
+        labels. Store planners need the family on the rectangle, and
+        label positions alone cannot tell a run from the aisle.
+        """
+
+        try:
+            dxftype = entity.dxftype()
+        except Exception:
+            return
+
+        try:
+
+            if dxftype == "LINE":
+
+                start = entity.dxf.start
+                end = entity.dxf.end
+
+                bay_segments.append((
+                    float(start.x), float(start.y),
+                    float(end.x), float(end.y)
+                ))
+
+            elif dxftype == "LWPOLYLINE":
+
+                points = [
+                    (float(p[0]), float(p[1]))
+                    for p in entity.get_points("xy")
+                ]
+
+                if len(points) >= 2:
+
+                    closed = False
+
+                    try:
+                        closed = bool(entity.closed)
+                    except Exception:
+                        closed = False
+
+                    if closed:
+                        points.append(points[0])
+
+                    for i in range(len(points) - 1):
+                        bay_segments.append((
+                            points[i][0], points[i][1],
+                            points[i + 1][0], points[i + 1][1]
+                        ))
+
+            elif dxftype == "POLYLINE":
+
+                points = [
+                    (float(v.dxf.location.x), float(v.dxf.location.y))
+                    for v in entity.vertices
+                ]
+
+                if len(points) >= 2:
+
+                    try:
+                        if entity.is_closed:
+                            points.append(points[0])
+                    except Exception:
+                        pass
+
+                    for i in range(len(points) - 1):
+                        bay_segments.append((
+                            points[i][0], points[i][1],
+                            points[i + 1][0], points[i + 1][1]
+                        ))
+
+            elif dxftype == "SOLID":
+
+                corners = []
+
+                for name in ("vtx0", "vtx1", "vtx2", "vtx3"):
+                    try:
+                        v = entity.dxf.get(name)
+                        corners.append((float(v.x), float(v.y)))
+                    except Exception:
+                        pass
+
+                for i in range(len(corners)):
+                    a = corners[i]
+                    b = corners[(i + 1) % len(corners)]
+                    bay_segments.append((a[0], a[1], b[0], b[1]))
+
+        except Exception:
+            pass
+
+
     def process_entity(entity):
+
+        collect_bay_segments(entity)
 
         text = ""
         x = 0.0
@@ -1144,6 +1461,53 @@ def extract_with_orientation(dxf_path):
     )
 
 
+    # ========================================================
+    # SNAP EACH GONDOLA ONTO ITS DRAWN RECTANGLE
+    # ========================================================
+    #
+    # This is what makes the trace overlap the gondola. The label pair
+    # gives a point inside the bay; the drawn rectangle gives the exact
+    # centre and the exact long axis.
+
+    print(
+        "Bay outline segments : {}".format(
+            len(bay_segments)
+        )
+    )
+
+    index = SegmentIndex(bay_segments)
+
+    snapped = 0
+
+    for g in gondolas:
+
+        rect = bay_rect_from_segments(
+            (g["x"], g["y"]),
+            index.near(g["x"], g["y"])
+        )
+
+        if rect is None:
+            continue
+
+        g["x"] = rect["x"]
+        g["y"] = rect["y"]
+        g["bay_length"] = rect["length"]
+        g["bay_depth"] = rect["depth"]
+        g["orientation_angle"] = rect["axis"]
+        g["orientation"] = get_orientation(rect["axis"])
+        g["orientation_source"] = "CAD_RECTANGLE"
+
+        snapped += 1
+
+    print(
+        "Snapped to CAD bay   : {} of {}".format(
+            snapped,
+            len(gondolas)
+        )
+    )
+    print("")
+
+
     return gondolas
 
 
@@ -1217,7 +1581,21 @@ def _tracing_to_revit_angle(orientation_angle):
 
 def apply_neighbor_orientations(items):
     resolved = [None] * len(items)
+
+    # A bay matched to its drawn rectangle is already exact. Never let
+    # neighbour voting move it: a run and the aisle beside it share the
+    # same 1200 mm spacing, which is what put half the V5 families 90
+    # degrees out.
+    for i, item in enumerate(items):
+        if item.get("orientation_source") == "CAD_RECTANGLE":
+            resolved[i] = (
+                normalize_line_angle(item.get("orientation_angle", 0.0)),
+                "CAD_RECTANGLE"
+            )
+
     for i, target in enumerate(items):
+        if resolved[i] is not None:
+            continue
         votes = []
         for j, other in enumerate(items):
             if i == j:
@@ -1230,20 +1608,41 @@ def apply_neighbor_orientations(items):
             weight = 2.0 if other["code"][:3] == target["code"][:3] else 1.0
             if other["code"] == target["code"]:
                 weight += 1.5
-            votes.append((weight, get_angle_from_offset(dx, dy)))
+            votes.append((
+                weight,
+                get_angle_from_offset(dx, dy),
+                math.degrees(math.atan2(dy, dx)) % 360.0
+            ))
         if not votes:
             continue
         buckets = []
-        for weight, ang in votes:
+        for weight, ang, bearing in votes:
             placed = False
             for bucket in buckets:
                 if _angular_delta(bucket["angle"], ang) <= 15.0:
                     bucket["weight"] += weight
                     bucket["angles"].append(ang)
+                    bucket["bearings"].append(bearing)
                     placed = True
                     break
             if not placed:
-                buckets.append({"angle": ang, "weight": weight, "angles": [ang]})
+                buckets.append({
+                    "angle": ang,
+                    "weight": weight,
+                    "angles": [ang],
+                    "bearings": [bearing],
+                })
+        # A run has bays on both sides. The aisle has bays on one side
+        # only, so two-sided support is the stronger signal.
+        for bucket in buckets:
+            first = bucket["bearings"][0]
+            opposite = any(
+                150.0 <= abs((b - first + 180.0) % 360.0 - 180.0) <= 210.0
+                or abs(abs(b - first) - 180.0) <= 30.0
+                for b in bucket["bearings"][1:]
+            )
+            if opposite:
+                bucket["weight"] += 3.0
         buckets.sort(key=lambda b: b["weight"], reverse=True)
         if buckets and buckets[0]["weight"] >= 1.0:
             resolved[i] = (_snap_line_angle(_mean_line_angle(buckets[0]["angles"])), "NEIGHBOR_RUN")
@@ -1280,7 +1679,15 @@ def apply_neighbor_orientations(items):
 
 
 gondolas = apply_neighbor_orientations(gondolas)
-print("Orientation rewrite : neighbour-run (original collect kept)")
+
+_by_source = {}
+for _g in gondolas:
+    _key = _g.get("orientation_source", "UNKNOWN")
+    _by_source[_key] = _by_source.get(_key, 0) + 1
+
+print("Orientation source:")
+for _key in sorted(_by_source):
+    print("  {:<28} {}".format(_key, _by_source[_key]))
 print("")
 
 

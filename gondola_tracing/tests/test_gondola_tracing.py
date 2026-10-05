@@ -1,3 +1,4 @@
+import math
 import os
 import sys
 import unittest
@@ -28,12 +29,17 @@ from gondola_lib import (
     merge_nearby_phrases,
     normalize_line_angle,
     pick_json_angle,
+    bay_alignment_delta,
     bay_axis_from_item,
+    bay_dims_from_item,
+    bay_rect_from_segments,
     compatible_leftover_labels,
     estimated_gondola_yield,
     fold_line_angle,
     footprint_alignment_delta,
+    footprint_fit_error,
     pick_label_set,
+    plan_extent,
     should_apply_cad_translation,
     should_scan_leftover,
     snap_line_angle,
@@ -378,6 +384,78 @@ class AngleTests(unittest.TestCase):
         self.assertEqual(normalize_line_angle(270), 90.0)
 
 
+def rect_segments(cx, cy, length, depth, axis_deg=0.0):
+    """Four sides of a rectangle, length along axis_deg."""
+    rad = math.radians(axis_deg)
+    ux, uy = math.cos(rad), math.sin(rad)
+    nx, ny = -uy, ux
+    hl, hd = length / 2.0, depth / 2.0
+    corners = []
+    for sl, sd in ((-1, -1), (1, -1), (1, 1), (-1, 1)):
+        corners.append((
+            cx + ux * hl * sl + nx * hd * sd,
+            cy + uy * hl * sl + ny * hd * sd,
+        ))
+    segs = []
+    for i in range(4):
+        x1, y1 = corners[i]
+        x2, y2 = corners[(i + 1) % 4]
+        segs.append((x1, y1, x2, y2))
+    return segs
+
+
+class BayRectangleTests(unittest.TestCase):
+    def test_reads_centre_and_axis_of_a_horizontal_bay(self):
+        # 1200 along X, 1000 across. Label sits off-centre inside it.
+        segs = rect_segments(10600, 5500, 1200, 1000, 0.0)
+        rect = bay_rect_from_segments((10450, 5680), segs)
+        self.assertIsNotNone(rect)
+        self.assertAlmostEqual(rect["x"], 10600, delta=1.0)
+        self.assertAlmostEqual(rect["y"], 5500, delta=1.0)
+        self.assertAlmostEqual(rect["length"], 1200, delta=1.0)
+        self.assertAlmostEqual(rect["depth"], 1000, delta=1.0)
+        self.assertAlmostEqual(rect["axis"], 0.0, delta=0.5)
+
+    def test_reads_axis_of_a_vertical_bay(self):
+        segs = rect_segments(2000, 9000, 1200, 1000, 90.0)
+        rect = bay_rect_from_segments((2100, 9150), segs)
+        self.assertIsNotNone(rect)
+        self.assertAlmostEqual(rect["x"], 2000, delta=1.0)
+        self.assertAlmostEqual(rect["y"], 9000, delta=1.0)
+        self.assertAlmostEqual(rect["axis"], 90.0, delta=0.5)
+
+    def test_reads_axis_of_a_forty_five_degree_bay(self):
+        segs = rect_segments(3000, 3000, 1200, 900, 135.0)
+        rect = bay_rect_from_segments((3050, 3040), segs)
+        self.assertIsNotNone(rect)
+        self.assertAlmostEqual(rect["axis"], 135.0, delta=1.0)
+        self.assertAlmostEqual(rect["length"], 1200, delta=2.0)
+
+    def test_picks_the_bay_holding_the_label_not_the_run_across_the_aisle(self):
+        # This is the V5 failure: a bay across the aisle voted for the
+        # perpendicular direction, so half the families were 90 out.
+        segs = rect_segments(10600, 5500, 1200, 1000, 0.0)
+        segs += rect_segments(10600, 9000, 1000, 1200, 90.0)
+        rect = bay_rect_from_segments((10600, 5520), segs)
+        self.assertIsNotNone(rect)
+        self.assertAlmostEqual(rect["y"], 5500, delta=1.0)
+        self.assertAlmostEqual(rect["axis"], 0.0, delta=0.5)
+
+    def test_ignores_long_walls_and_tiny_ticks(self):
+        segs = rect_segments(10600, 5500, 1200, 1000, 0.0)
+        segs.append((0, 5000, 90000, 5000))
+        segs.append((10600, 5500, 10620, 5500))
+        rect = bay_rect_from_segments((10600, 5500), segs)
+        self.assertIsNotNone(rect)
+        self.assertAlmostEqual(rect["length"], 1200, delta=1.0)
+
+    def test_returns_none_without_a_closing_rectangle(self):
+        self.assertIsNone(bay_rect_from_segments((0, 0), []))
+        self.assertIsNone(
+            bay_rect_from_segments((0, 0), [(0, 0, 1200, 0)])
+        )
+
+
 class FootprintAlignmentTests(unittest.TestCase):
     def test_bay_axis_prefers_long_axis_field(self):
         self.assertEqual(bay_axis_from_item({"orientation_angle": 0.0}), 0.0)
@@ -415,6 +493,64 @@ class FootprintAlignmentTests(unittest.TestCase):
         self.assertEqual(fold_line_angle(270.0), 90.0)
         self.assertEqual(fold_line_angle(-90.0), 90.0)
         self.assertEqual(fold_line_angle(360.0), 0.0)
+
+
+class BayDimensionAlignmentTests(unittest.TestCase):
+    def test_plan_extent_of_turned_rectangle(self):
+        self.assertEqual(plan_extent(1200.0, 900.0, 0.0), (1200.0, 900.0))
+        x, y = plan_extent(1200.0, 900.0, 90.0)
+        self.assertAlmostEqual(x, 900.0)
+        self.assertAlmostEqual(y, 1200.0)
+        x, y = plan_extent(1200.0, 900.0, 45.0)
+        self.assertAlmostEqual(x, 2100.0 / math.sqrt(2.0))
+        self.assertAlmostEqual(y, 2100.0 / math.sqrt(2.0))
+
+    def test_bay_dims_put_the_long_side_first(self):
+        self.assertEqual(
+            bay_dims_from_item({"bay_length": 900.0, "bay_depth": 1200.0}),
+            (1200.0, 900.0),
+        )
+        self.assertIsNone(bay_dims_from_item({"bay_length": 1200.0}))
+        self.assertIsNone(bay_dims_from_item({}))
+
+    def test_without_bay_dims_it_matches_the_long_axis_turn(self):
+        self.assertEqual(bay_alignment_delta(4.0, 2.0, 90.0), 90.0)
+        self.assertEqual(bay_alignment_delta(2.0, 4.0, 0.0), -90.0)
+
+    def test_bay_dims_keep_the_turn_that_matches_the_drawn_bay(self):
+        # Family box 1200 x 1000 traced from a 1200 x 1000 bay running
+        # along +Y: it has to end up 1000 across and 1200 deep.
+        self.assertEqual(
+            bay_alignment_delta(1200.0, 1000.0, 90.0, 1200.0, 1000.0), 90.0
+        )
+        self.assertEqual(
+            bay_alignment_delta(1200.0, 1000.0, 0.0, 1200.0, 1000.0), 0.0
+        )
+
+    def test_a_box_wider_than_its_bay_still_turns_the_right_way(self):
+        # Revit boxes include header rails and kicks, so the measured box
+        # is often longer than the drawn bay. The 90 degree error swaps
+        # the extents, which loses by far more than the size difference.
+        self.assertEqual(
+            bay_alignment_delta(1500.0, 1000.0, 90.0, 1200.0, 1000.0), 90.0
+        )
+        self.assertEqual(
+            bay_alignment_delta(1000.0, 1500.0, 90.0, 1200.0, 1000.0), 0.0
+        )
+
+    def test_square_box_is_left_alone_even_with_bay_dims(self):
+        self.assertEqual(
+            bay_alignment_delta(1000.0, 1000.0, 90.0, 1200.0, 1000.0), 0.0
+        )
+
+    def test_fit_error_reports_each_axis(self):
+        error = footprint_fit_error(1300.0, 1000.0, 1200.0, 1000.0, 0.0)
+        self.assertAlmostEqual(error[0], 100.0)
+        self.assertAlmostEqual(error[1], 0.0)
+        error = footprint_fit_error(1000.0, 1200.0, 1200.0, 1000.0, 90.0)
+        self.assertAlmostEqual(error[0], 0.0)
+        self.assertAlmostEqual(error[1], 0.0)
+        self.assertIsNone(footprint_fit_error(1.0, 1.0, None, None, 0.0))
 
 
 class MatchingTests(unittest.TestCase):

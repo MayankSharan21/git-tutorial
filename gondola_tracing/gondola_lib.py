@@ -795,6 +795,166 @@ def should_apply_cad_translation(xs, cad_x_mm, pad_mm=80000.0):
     return not (cad_x_mm - pad_mm <= min_x <= cad_x_mm + 250000.0)
 
 
+BAY_MIN_SIDE_MM = 250.0
+BAY_MAX_SIDE_MM = 4200.0
+BAY_SEARCH_MM = 1600.0
+
+
+def segment_length(seg):
+    return math.hypot(seg[2] - seg[0], seg[3] - seg[1])
+
+
+def segment_angle(seg):
+    """Undirected angle of a segment, 0 = +X, 90 = +Y."""
+    return normalize_line_angle(
+        math.degrees(math.atan2(seg[3] - seg[1], seg[2] - seg[0]))
+    )
+
+
+def _dominant_angle(segments):
+    """Length-weighted dominant direction of a segment bundle."""
+    buckets = []
+    for seg in segments:
+        length = segment_length(seg)
+        if length <= 0.0:
+            continue
+        ang = segment_angle(seg)
+        for bucket in buckets:
+            if angular_delta(bucket["angle"], ang) <= 8.0:
+                bucket["weight"] += length
+                bucket["angles"].append((ang, length))
+                break
+        else:
+            buckets.append({"angle": ang, "weight": length, "angles": [(ang, length)]})
+    if not buckets:
+        return None
+    buckets.sort(key=lambda b: b["weight"], reverse=True)
+    best = buckets[0]
+    total = sum(w for _, w in best["angles"])
+    if total <= 0.0:
+        return best["angle"]
+    x = sum(math.cos(math.radians(2.0 * a)) * w for a, w in best["angles"])
+    y = sum(math.sin(math.radians(2.0 * a)) * w for a, w in best["angles"])
+    return normalize_line_angle(math.degrees(math.atan2(y, x)) / 2.0)
+
+
+def _straddling_extent(point, segments, edge_dir_deg, measure_dir_deg):
+    """
+    Distance from point to the nearest parallel edge on each side.
+
+    `edge_dir_deg` is the direction the edges run. Offsets are measured
+    along `measure_dir_deg`, so the caller controls the sign and the
+    two results can be combined without a hidden convention.
+    """
+    edge_rad = math.radians(edge_dir_deg)
+    ux, uy = math.cos(edge_rad), math.sin(edge_rad)
+    measure_rad = math.radians(measure_dir_deg)
+    nx, ny = math.cos(measure_rad), math.sin(measure_rad)
+    px, py = point
+
+    low = None
+    high = None
+    for seg in segments:
+        mid_x = (seg[0] + seg[2]) / 2.0
+        mid_y = (seg[1] + seg[3]) / 2.0
+        offset = (mid_x - px) * nx + (mid_y - py) * ny
+        extent = abs((seg[2] - seg[0]) * ux + (seg[3] - seg[1]) * uy)
+        if extent < BAY_MIN_SIDE_MM * 0.6:
+            continue
+        # The edge must span the point along its own direction.
+        centre_along = (mid_x - px) * ux + (mid_y - py) * uy
+        if abs(centre_along) > extent / 2.0 + 200.0:
+            continue
+        if offset <= 0.0:
+            if low is None or offset > low:
+                low = offset
+        else:
+            if high is None or offset < high:
+                high = offset
+    if low is None or high is None:
+        return None
+    width = high - low
+    if not (BAY_MIN_SIDE_MM <= width <= BAY_MAX_SIDE_MM):
+        return None
+    return low, high, width
+
+
+def bay_rect_from_segments(point, segments, search_mm=BAY_SEARCH_MM):
+    """
+    Fit the CAD bay rectangle that holds a label.
+
+    Store planners want the family to sit exactly on the drawn gondola.
+    Label positions alone cannot tell a run from the aisle beside it, so
+    read the rectangle: its centre is the bay centre and its long side
+    is the bay axis.
+
+    Returns {'x', 'y', 'length', 'depth', 'axis'} or None.
+    """
+    px, py = float(point[0]), float(point[1])
+    near = []
+    for seg in segments or ():
+        length = segment_length(seg)
+        if length < BAY_MIN_SIDE_MM * 0.6 or length > BAY_MAX_SIDE_MM:
+            continue
+        mid_x = (seg[0] + seg[2]) / 2.0
+        mid_y = (seg[1] + seg[3]) / 2.0
+        if abs(mid_x - px) > search_mm or abs(mid_y - py) > search_mm:
+            continue
+        near.append(seg)
+    if len(near) < 2:
+        return None
+
+    axis = _dominant_angle(near)
+    if axis is None:
+        return None
+
+    parallel = [s for s in near if angular_delta(segment_angle(s), axis) <= 12.0]
+    perpendicular = [
+        s for s in near
+        if angular_delta(segment_angle(s), normalize_line_angle(axis + 90.0)) <= 12.0
+    ]
+    if not parallel or not perpendicular:
+        return None
+
+    across_dir = normalize_line_angle(axis + 90.0)
+
+    # Long sides run along the axis; measure how far they sit across it.
+    across = _straddling_extent((px, py), parallel, axis, across_dir)
+    # Short ends run across the axis; measure how far they sit along it.
+    along = _straddling_extent((px, py), perpendicular, across_dir, axis)
+    if across is None or along is None:
+        return None
+
+    rad = math.radians(axis)
+    ux, uy = math.cos(rad), math.sin(rad)
+    across_rad = math.radians(across_dir)
+    nx, ny = math.cos(across_rad), math.sin(across_rad)
+
+    across_mid = (across[0] + across[1]) / 2.0
+    along_mid = (along[0] + along[1]) / 2.0
+
+    cx = px + nx * across_mid + ux * along_mid
+    cy = py + ny * across_mid + uy * along_mid
+
+    side_along = along[2]
+    side_across = across[2]
+
+    if side_along >= side_across:
+        long_axis = axis
+        length, depth = side_along, side_across
+    else:
+        long_axis = normalize_line_angle(axis + 90.0)
+        length, depth = side_across, side_along
+
+    return {
+        "x": round(cx, 3),
+        "y": round(cy, 3),
+        "length": round(length, 1),
+        "depth": round(depth, 1),
+        "axis": round(long_axis, 3),
+    }
+
+
 def fold_line_angle(angle):
     """Fold a direction onto 0 <= angle < 180."""
     try:
@@ -855,6 +1015,95 @@ def footprint_alignment_delta(width, depth, bay_axis):
     elif delta < -90.0:
         delta += 180.0
     return delta
+
+
+def plan_extent(length, depth, axis):
+    """
+    Axis-aligned plan extents of a length x depth rectangle turned to `axis`.
+
+    Revit reports bounding boxes in world axes, so this is what a placed
+    footprint should measure once it follows the bay.
+    """
+    rad = math.radians(fold_line_angle(axis))
+    cos_a, sin_a = abs(math.cos(rad)), abs(math.sin(rad))
+    return (
+        length * cos_a + depth * sin_a,
+        length * sin_a + depth * cos_a,
+    )
+
+
+def bay_dims_from_item(item):
+    """Drawn bay length and depth in mm, long side first, or None."""
+    item = item or {}
+    try:
+        length = float(item.get("bay_length"))
+        depth = float(item.get("bay_depth"))
+    except (TypeError, ValueError):
+        return None
+    if length <= 0.0 or depth <= 0.0:
+        return None
+    if depth > length:
+        length, depth = depth, length
+    return (length, depth)
+
+
+def bay_alignment_delta(width, depth, bay_axis, bay_length=None, bay_depth=None):
+    """
+    Degrees to turn a placed footprint onto the bay it was traced from.
+
+    Without the drawn bay this is just the long-axis turn. With it, the
+    quarter turn either side is scored against the extents the bay would
+    occupy, which survives a family whose box is wider than its
+    footprint: a 90 degree error swaps the extents and loses badly.
+    """
+    delta = footprint_alignment_delta(width, depth, bay_axis)
+
+    dims = bay_dims_from_item(
+        {"bay_length": bay_length, "bay_depth": bay_depth}
+    )
+    if dims is None:
+        return delta
+
+    try:
+        width = float(width)
+        depth = float(depth)
+    except (TypeError, ValueError):
+        return delta
+
+    body_long, body_short = max(width, depth), min(width, depth)
+    if body_long - body_short < 1e-6:
+        return delta
+
+    body_axis = 0.0 if width >= depth else 90.0
+    want_x, want_y = plan_extent(dims[0], dims[1], bay_axis)
+
+    best, best_score = delta, None
+    for candidate in (delta, delta + 90.0, delta - 90.0):
+        if candidate > 90.0 or candidate < -90.0:
+            continue
+        got_x, got_y = plan_extent(
+            body_long, body_short, body_axis + candidate
+        )
+        score = abs(got_x - want_x) + abs(got_y - want_y)
+        if best_score is None or score < best_score - 1e-9:
+            best, best_score = candidate, score
+    return best
+
+
+def footprint_fit_error(width, depth, bay_length, bay_depth, bay_axis):
+    """How far a placed footprint's extents miss the drawn bay, per axis."""
+    dims = bay_dims_from_item(
+        {"bay_length": bay_length, "bay_depth": bay_depth}
+    )
+    if dims is None:
+        return None
+    try:
+        width = float(width)
+        depth = float(depth)
+    except (TypeError, ValueError):
+        return None
+    want_x, want_y = plan_extent(dims[0], dims[1], bay_axis)
+    return (width - want_x, depth - want_y)
 
 
 def load_gondola_items(data):
