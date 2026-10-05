@@ -1,7 +1,7 @@
 # Dynamo_ExistingGondolaPlacement
 # Revit 2025 / Dynamo CPython3 compatible
 #
-# Version 2026-10-05i-clean-trace
+# Version 2026-10-05j-leftover-primary
 #
 # Places existing-condition gondolas from the JSON written by
 # Gondola_OrientationDetector.py.
@@ -62,7 +62,7 @@ except Exception:
     TransactionManager = None
 
 
-JSON_PATH = r"C:\Users\msharan\OneDrive - Kmart Australia Limited\Desktop\Stores Foundry\Tracing\json\gondola_data_Marrickville_New3.json"
+JSON_PATH = r"C:\Users\msharan\OneDrive - Kmart Australia Limited\Desktop\Stores Foundry\Tracing\json\gondola_data_Marrickville_New4.json"
 LEVEL_NAME = "00-GROUND"
 VIEW_NAME = "1.0 EXISTING CONDITIONS - GROUND"
 CAD_LINK_NAME = ""
@@ -70,7 +70,7 @@ MM_TO_FT = 1.0 / 304.8
 
 # Hard rule: place only on Existing. Never Proposed, selling-floor, or overlay.
 EXISTING_ONLY = True
-SCRIPT_VERSION = "2026-10-05i-clean-trace"
+SCRIPT_VERSION = "2026-10-05j-leftover-primary"
 TRACE_NOTE_PREFIX = "EG:"
 
 USE_JSON_ANGLE = True
@@ -1560,6 +1560,7 @@ lines = [
     "",
     "Script version         : {}".format(SCRIPT_VERSION),
     "JSON path              : {}".format(JSON_PATH),
+    "Expect detector JSON   : gondola_data_Marrickville_New4.json",
     "JSON file size         : {} bytes".format(json_size),
     "JSON keys              : {}".format(json_keys),
     "JSON reported total    : {}".format(json_reported_total),

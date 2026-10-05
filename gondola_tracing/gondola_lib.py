@@ -635,6 +635,108 @@ def should_scan_leftover(labels):
     return not has_classified_gondola(labels)
 
 
+LOCAL_COORD_MAX_MM = 120000.0
+ISLAND_BIN_MM = 150000.0
+
+
+def classified_labels(labels):
+    return [lab for lab in (labels or []) if identify_text(lab.get("text", ""))]
+
+
+def estimated_gondola_yield(labels):
+    """How many families this set would produce after SIZE+TYPE pairing."""
+    full = 0
+    size = 0
+    typ = 0
+    for lab in labels or []:
+        identified = identify_text(lab.get("text", ""))
+        if not identified:
+            continue
+        kind = identified[0]
+        if kind in ("FULL", "PAIR"):
+            full += 1
+        elif kind == "SIZE":
+            size += 1
+        elif kind == "TYPE":
+            typ += 1
+    return full + min(size, typ)
+
+
+def _label_xy(label):
+    try:
+        return float(label["x"]), float(label["y"])
+    except (TypeError, ValueError, KeyError):
+        return None
+
+
+def split_label_islands(labels, bin_mm=ISLAND_BIN_MM):
+    """Group labels that sit in the same ~150 m coordinate island."""
+    buckets = defaultdict(list)
+    for lab in labels or []:
+        point = _label_xy(lab)
+        if point is None:
+            continue
+        key = (int(math.floor(point[0] / bin_mm)), int(math.floor(point[1] / bin_mm)))
+        buckets[key].append(lab)
+    return list(buckets.values())
+
+
+def richest_label_island(labels):
+    """Keep the island that would produce the most gondolas."""
+    islands = split_label_islands(labels)
+    if not islands:
+        return list(labels or [])
+    islands.sort(
+        key=lambda island: (estimated_gondola_yield(island), len(classified_labels(island))),
+        reverse=True,
+    )
+    return list(islands[0])
+
+
+def island_is_local(labels):
+    classified = classified_labels(labels)
+    if not classified:
+        return True
+    return min(float(lab["x"]) for lab in classified) < LOCAL_COORD_MAX_MM
+
+
+def pick_label_set(modelspace_labels, leftover_labels):
+    """
+    Use exactly one coordinate island.
+
+    The first Marrickville run that filled the floor used leftover-block
+    LOCAL coordinates (a few metres to ~80 m). Dynamo then added the
+    Existing Conditions CAD offset. Later collectors mixed those leftover
+    SIZE+TYPE labels with XREF world coordinates (~275 m). Mixing drops
+    the leftover pairs and under-traces the plan.
+
+    Prefer leftover when it is local and would place at least as many
+    families as modelspace. Never merge two islands.
+    """
+    model_island = richest_label_island(modelspace_labels)
+    leftover_island = richest_label_island(leftover_labels)
+    model_yield = estimated_gondola_yield(model_island)
+    leftover_yield = estimated_gondola_yield(leftover_island)
+
+    if leftover_yield == 0:
+        return list(model_island), "modelspace"
+    if model_yield == 0:
+        return list(leftover_island), "leftover"
+
+    leftover_local = island_is_local(leftover_island)
+
+    # Local leftover is the first-version path. Accept it when it covers
+    # at least 80% of the XREF yield so overlay FULL codes cannot steal
+    # the island and drop SIZE+TYPE pairs.
+    if leftover_local and leftover_yield >= max(1, int(model_yield * 0.8)):
+        return list(leftover_island), "leftover-local"
+    if leftover_yield > model_yield:
+        return list(leftover_island), "leftover-richer"
+
+    extra = compatible_leftover_labels(model_island, leftover_labels)
+    return list(model_island) + extra, "modelspace+compatible"
+
+
 def compatible_leftover_labels(base_labels, extra_labels, pad_mm=80000.0):
     """
     Keep leftover labels that sit in the same coordinate island as

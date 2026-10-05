@@ -28,11 +28,12 @@ The 5 Oct 2026 run placed **1526 / 1593** items and every family landed at **0°
 | `6WAY` skipped | Detector uppercased the code; TYPE_MAP key was `6Way` |
 | Deck / hotspot items skipped | Preferred Revit types were not loaded and there was no fallback |
 | Dynamo `Total JSON items : 0` | Detector skipped leftover blocks after seeing title text, and skipped the Selling-floor XREF that actually holds the store codes |
+| V3 PDF: small inset families, gaps, worse than first run | Detector mixed leftover LOCAL SIZE+TYPE with XREF world coordinates, then Dynamo read an older New3 JSON |
 
 ## What the new detector does
 
 - Cleans MTEXT formatting and split labels (`15F` + `MCA`, `15F\PMCA`).
-- Walks modelspace INSERTs / XREFs instead of raw block-definition coordinates.
+- Walks leftover block definitions first when those local SIZE+TYPE labels fill more bays than modelspace XREF world coordinates. That is the first Marrickville path (local mm + CAD offset). It never mixes the two islands.
 - Matches SIZE+TYPE with mutual nearest-neighbour and a ~700 mm stack window so adjacent 1200 mm bays are not paired.
 - Infers orientation from neighbouring bay centres (1200 / 1500 / 1800 mm runs). This is what aligns the Marrickville south wall, west wall, and 45° corner.
 - Writes three angle fields:
@@ -51,7 +52,7 @@ The 5 Oct 2026 run placed **1526 / 1593** items and every family landed at **0°
 
 ## How to run
 
-1. Replace **both** files. Dynamo must report `2026-10-05i-clean-trace`. It deletes the `EG:` tags (those were sitting on the CAD labels). Re-run the detector so leftover Existing SIZE+TYPE labels are merged, then run Dynamo.
+1. Replace **both** files. Dynamo must report `2026-10-05j-leftover-primary`. Re-run the detector so it writes `gondola_data_Marrickville_New4.json` from leftover-block local coordinates, then run Dynamo. Do not reuse New2 / New3 — those mixed world-space XREF labels and under-traced the floor.
 2. Copy only `Gondola_OrientationDetector.py` into the Tracing folder. It is standalone — an old `gondola_lib.py` in that folder is ignored.
 3. Edit `DXF_FILE_PATH` and `OUTPUT_JSON` at the top of `Gondola_OrientationDetector.py`. Use the Existing Conditions GROUND DXF.
 4. `pip install ezdxf` if needed, then run the detector.

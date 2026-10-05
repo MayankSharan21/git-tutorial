@@ -4,9 +4,10 @@
 # This file does not need gondola_lib.py. If an old gondola_lib.py is
 # sitting in the same folder, it is ignored.
 #
-# Version 2026-10-05c-existing-restore
-# If Dynamo reports Total JSON items : 0, this file was not the one
-# that wrote the JSON, or an older detector emptied it.
+# Version 2026-10-05j-leftover-primary
+# Uses leftover-block LOCAL coordinates when they fill more bays than
+# modelspace XREF world coordinates. Dynamo then adds the CAD offset.
+# JSON must be gondola_data_Marrickville_New4.json — same path as Dynamo.
 
 import platform as _platform
 
@@ -664,6 +665,100 @@ def should_scan_leftover(labels):
     return not has_classified_gondola(labels)
 
 
+LOCAL_COORD_MAX_MM = 120000.0
+ISLAND_BIN_MM = 150000.0
+
+
+def classified_labels(labels):
+    return [lab for lab in (labels or []) if identify_text(lab.get("text", ""))]
+
+
+def estimated_gondola_yield(labels):
+    """How many families this set would produce after SIZE+TYPE pairing."""
+    full = 0
+    size = 0
+    typ = 0
+    for lab in labels or []:
+        identified = identify_text(lab.get("text", ""))
+        if not identified:
+            continue
+        kind = identified[0]
+        if kind in ("FULL", "PAIR"):
+            full += 1
+        elif kind == "SIZE":
+            size += 1
+        elif kind == "TYPE":
+            typ += 1
+    return full + min(size, typ)
+
+
+def _label_xy(label):
+    try:
+        return float(label["x"]), float(label["y"])
+    except (TypeError, ValueError, KeyError):
+        return None
+
+
+def split_label_islands(labels, bin_mm=ISLAND_BIN_MM):
+    """Group labels that sit in the same ~150 m coordinate island."""
+    buckets = defaultdict(list)
+    for lab in labels or []:
+        point = _label_xy(lab)
+        if point is None:
+            continue
+        key = (int(math.floor(point[0] / bin_mm)), int(math.floor(point[1] / bin_mm)))
+        buckets[key].append(lab)
+    return list(buckets.values())
+
+
+def richest_label_island(labels):
+    """Keep the island that would produce the most gondolas."""
+    islands = split_label_islands(labels)
+    if not islands:
+        return list(labels or [])
+    islands.sort(
+        key=lambda island: (estimated_gondola_yield(island), len(classified_labels(island))),
+        reverse=True,
+    )
+    return list(islands[0])
+
+
+def island_is_local(labels):
+    classified = classified_labels(labels)
+    if not classified:
+        return True
+    return min(float(lab["x"]) for lab in classified) < LOCAL_COORD_MAX_MM
+
+
+def pick_label_set(modelspace_labels, leftover_labels):
+    """
+    Use exactly one coordinate island.
+
+    The first Marrickville run that filled the floor used leftover-block
+    LOCAL coordinates. Dynamo then added the Existing Conditions CAD
+    offset. Mixing leftover SIZE+TYPE with XREF world coordinates drops
+    the leftover pairs and under-traces the plan.
+    """
+    model_island = richest_label_island(modelspace_labels)
+    leftover_island = richest_label_island(leftover_labels)
+    model_yield = estimated_gondola_yield(model_island)
+    leftover_yield = estimated_gondola_yield(leftover_island)
+
+    if leftover_yield == 0:
+        return list(model_island), "modelspace"
+    if model_yield == 0:
+        return list(leftover_island), "leftover"
+
+    leftover_local = island_is_local(leftover_island)
+    if leftover_local and leftover_yield >= max(1, int(model_yield * 0.8)):
+        return list(leftover_island), "leftover-local"
+    if leftover_yield > model_yield:
+        return list(leftover_island), "leftover-richer"
+
+    extra = compatible_leftover_labels(model_island, leftover_labels)
+    return list(model_island) + extra, "modelspace+compatible"
+
+
 def compatible_leftover_labels(base_labels, extra_labels, pad_mm=80000.0):
     """Keep leftover labels in the same coordinate island as modelspace."""
     if not extra_labels:
@@ -1210,12 +1305,12 @@ def summarise(gondolas):
 
 DXF_FILE_PATH = r"C:\Users\msharan\OneDrive - Kmart Australia Limited\Desktop\Stores Foundry\PPT , Requirements, Demo videos, Pics\1131 Marrickville-Existing plan trace exercise_2 - Floor Plan - 1-0 EXISTING CONDITIONS - GROUND.dxf"
 
-OUTPUT_JSON = r"C:\Users\msharan\OneDrive - Kmart Australia Limited\Desktop\Stores Foundry\Tracing\json\gondola_data_Marrickville_New2.json"
+OUTPUT_JSON = r"C:\Users\msharan\OneDrive - Kmart Australia Limited\Desktop\Stores Foundry\Tracing\json\gondola_data_Marrickville_New4.json"
 
 # Prefer Existing-named sources. Never write an empty JSON just because
 # the only XREF or leftover block is named Selling floor / Overlay.
 EXISTING_ONLY = True
-SCRIPT_VERSION = "2026-10-05c-existing-restore"
+SCRIPT_VERSION = "2026-10-05j-leftover-primary"
 
 
 def _entity_point(entity):
@@ -1371,28 +1466,44 @@ def collect_dxf_labels(dxf_path):
     print("Modelspace labels : {}".format(len(labels)))
 
     leftover_used = 0
-    print("Scanning leftover existing/unknown block definitions...")
+    print("Scanning leftover block definitions (first-version path)...")
     extra, skipped_proposed = _scan_leftover_blocks(doc, skip_proposed=True)
-    extra = compatible_leftover_labels(labels, extra)
     print(
-        "Leftover compatible existing/unknown: {}  skipped proposed-named: {}".format(
+        "Leftover existing/unknown: {}  skipped proposed-named: {}".format(
             len(extra), skipped_proposed
         )
     )
-    labels.extend(extra)
-    leftover_used = len(extra)
-    if should_scan_leftover(labels):
-        print("Still no gondola codes. Including proposed-named leftover blocks...")
-        extra_all, _ = _scan_leftover_blocks(doc, skip_proposed=False)
-        extra_all = compatible_leftover_labels(labels, extra_all)
-        print("Leftover compatible (all named blocks): {}".format(len(extra_all)))
-        labels.extend(extra_all)
-        leftover_used = len(extra_all)
+    if not has_classified_gondola(extra):
+        print("Existing-named leftover has no gondola codes. Including all leftover blocks...")
+        extra, _ = _scan_leftover_blocks(doc, skip_proposed=False)
+        print("Leftover all-named blocks: {}".format(len(extra)))
+
+    labels, island_source = pick_label_set(labels, extra)
+    leftover_used = estimated_gondola_yield(extra)
+    print("Label island            : {}".format(island_source))
+    classified = classified_labels(labels)
+    if classified:
+        xs = [float(lab["x"]) for lab in classified]
+        ys = [float(lab["y"]) for lab in classified]
+        print(
+            "Island classified       : {}  yield={}  x={:.0f}..{:.0f}  y={:.0f}..{:.0f}".format(
+                len(classified),
+                estimated_gondola_yield(labels),
+                min(xs),
+                max(xs),
+                min(ys),
+                max(ys),
+            )
+        )
+        if island_is_local(labels):
+            print("Island coordinates      : LOCAL (Dynamo will add the CAD offset)")
+        else:
+            print("Island coordinates      : WORLD (Dynamo will skip the CAD offset)")
 
     labels, source_info = keep_existing_source_labels(labels, EXISTING_ONLY)
     print("Labels after source filter: {}".format(len(labels)))
     print("Dropped proposed-named source: {}".format(source_info["dropped_proposed_source"]))
-    print("Leftover labels used    : {}".format(leftover_used))
+    print("Leftover yield          : {}".format(leftover_used))
     print("Labels collected        : {}".format(len(labels)))
     print("")
     return labels
