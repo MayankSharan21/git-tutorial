@@ -1,7 +1,7 @@
 # Dynamo_ExistingGondolaPlacement
 # Revit 2025 / Dynamo CPython3 compatible
 #
-# Version 2026-10-05c-existing-restore
+# Version 2026-10-05d-existing-view
 #
 # Places existing-condition gondolas from the JSON written by
 # Gondola_OrientationDetector.py.
@@ -39,20 +39,21 @@ from Autodesk.Revit.DB import (
     BuiltInParameter,
     OverrideGraphicSettings,
     Color,
-    ImportInstance
+    ImportInstance,
 )
 from Autodesk.Revit.DB.Structure import StructuralType
 from RevitServices.Persistence import DocumentManager
 
 
-JSON_PATH = r"C:\Users\msharan\OneDrive - Kmart Australia Limited\Desktop\Stores Foundry\Tracing\json\gondola_data_Marrickville_New2.json"
+JSON_PATH = r"C:\Users\msharan\OneDrive - Kmart Australia Limited\Desktop\Stores Foundry\Tracing\json\gondola_data_Marrickville_New3.json"
 LEVEL_NAME = "00-GROUND"
+VIEW_NAME = "1.0 EXISTING CONDITIONS - GROUND"
 CAD_LINK_NAME = ""
 MM_TO_FT = 1.0 / 304.8
 
 # Hard rule: place only on Existing. Never Proposed, selling-floor, or overlay.
 EXISTING_ONLY = True
-SCRIPT_VERSION = "2026-10-05c-existing-restore"
+SCRIPT_VERSION = "2026-10-05d-existing-view"
 
 USE_JSON_ANGLE = True
 ANGLE_SIGN = 1.0
@@ -637,22 +638,54 @@ def choose_existing_level_name(level_names, preferred=""):
     return None
 
 
-def choose_existing_view_name(views, level_name):
-    ranked = []
+def existing_view_score(view_name, view_level="", preferred_level=""):
+    scope = classify_revit_name(view_name)
+    if scope in ("proposed", "overlay"):
+        return 0
+    name = str(view_name or "").lower()
+    score = 0
+    if scope == "existing" and "condition" in name and "ground" in name:
+        score = 100
+    elif scope == "existing" and "condition" in name:
+        score = 90
+    elif scope == "existing" and "ground" in name:
+        score = 70
+    elif scope == "existing":
+        score = 50
+    elif preferred_level and str(view_level) == str(preferred_level):
+        score = 20
+    else:
+        return 0
+    if preferred_level and str(view_level) == str(preferred_level):
+        score += 5
+    return score
+
+
+def choose_existing_view_name(views, level_name=""):
+    best_name = None
+    best_score = 0
     for view_name, view_level in views:
-        if str(view_level) != str(level_name):
-            continue
-        scope = classify_revit_name(view_name)
-        if scope in ("proposed", "overlay"):
-            continue
-        ranked.append((scope, str(view_name)))
-    for scope, view_name in ranked:
-        if scope == "existing" and "condition" in view_name.lower():
-            return view_name
-    for scope, view_name in ranked:
-        if scope == "existing":
-            return view_name
-    return None
+        score = existing_view_score(view_name, view_level, level_name)
+        if score > best_score:
+            best_score = score
+            best_name = str(view_name)
+    return best_name
+
+
+def choose_existing_placement(views, level_names, preferred_level="", preferred_view=""):
+    views = [(str(v), str(l)) for v, l in views if v]
+    if preferred_view:
+        preferred_l = str(preferred_view).strip().lower()
+        for view_name, view_level in views:
+            if view_name.strip().lower() == preferred_l:
+                if classify_revit_name(view_name) not in ("proposed", "overlay"):
+                    return view_name, view_level
+    view_name = choose_existing_view_name(views, preferred_level)
+    if view_name:
+        for name, level in views:
+            if name == view_name:
+                return name, level
+    return None, choose_existing_level_name(level_names, preferred_level)
 
 
 # ---------------------------------------------------------------------------
@@ -836,7 +869,8 @@ for code, mapping in sorted(TYPE_MAP_NORM.items()):
 
 
 # ---------------------------------------------------------------------------
-# Level / view — Existing only. Never Proposed or overlay.
+# Level / view — Existing Conditions view first, then its associated level.
+# Families only appear on the floor plan whose associated level they sit on.
 # ---------------------------------------------------------------------------
 
 all_levels = list(FilteredElementCollector(doc).OfClass(Level))
@@ -847,35 +881,6 @@ for level in all_levels:
             level_map[str(level.Name)] = level
     except Exception:
         pass
-
-if EXISTING_ONLY and is_proposed_scope(LEVEL_NAME):
-    raise Exception(
-        "LEVEL_NAME '{}' is a Proposed / overlay level.\n"
-        "Tracing must be placed on an Existing level only.\n\n"
-        "Available levels:\n{}".format(
-            LEVEL_NAME,
-            "\n".join("  " + name for name in sorted(level_map.keys())),
-        )
-    )
-
-chosen_level_name = choose_existing_level_name(level_map.keys(), LEVEL_NAME)
-target_level = level_map.get(chosen_level_name) if chosen_level_name else None
-
-if target_level is None:
-    raise Exception(
-        "No Existing level found. Tracing will not use a Proposed level.\n"
-        "Set LEVEL_NAME to an Existing level.\n\n"
-        "Available levels:\n{}".format(
-            "\n".join("  " + name for name in sorted(level_map.keys()))
-        )
-    )
-
-if EXISTING_ONLY and is_proposed_scope(target_level.Name):
-    raise Exception(
-        "Refusing to place on '{}'. Existing-only tracing is enabled.".format(
-            target_level.Name
-        )
-    )
 
 all_views = list(FilteredElementCollector(doc).OfClass(ViewPlan))
 view_records = []
@@ -889,16 +894,92 @@ for view in all_views:
     except Exception:
         pass
 
-chosen_view_name = choose_existing_view_name(view_records, target_level.Name)
+active_view = None
+try:
+    uiapp = DocumentManager.Instance.CurrentUIApplication
+    uidoc = uiapp.ActiveUIDocument if uiapp is not None else None
+    if uidoc is not None:
+        active_view = uidoc.ActiveView
+except Exception:
+    active_view = None
+
+placement_reason = "auto"
+chosen_view_name = None
+chosen_level_name = None
+
+if (
+    active_view is not None
+    and classify_revit_name(getattr(active_view, "Name", "")) == "existing"
+    and getattr(active_view, "GenLevel", None) is not None
+):
+    chosen_view_name = str(active_view.Name)
+    chosen_level_name = str(active_view.GenLevel.Name)
+    placement_reason = "active Existing view"
+else:
+    chosen_view_name, chosen_level_name = choose_existing_placement(
+        view_records,
+        level_map.keys(),
+        LEVEL_NAME,
+        VIEW_NAME,
+    )
+    if chosen_view_name:
+        placement_reason = "Existing Conditions view"
+    else:
+        placement_reason = "Existing level fallback"
+
 target_view = view_by_name.get(chosen_view_name) if chosen_view_name else None
+if target_view is None and chosen_view_name and active_view is not None:
+    try:
+        if str(active_view.Name) == str(chosen_view_name):
+            target_view = active_view
+    except Exception:
+        pass
+
+target_level = None
+if target_view is not None and getattr(target_view, "GenLevel", None) is not None:
+    target_level = target_view.GenLevel
+    chosen_level_name = str(target_level.Name)
+elif chosen_level_name:
+    target_level = level_map.get(chosen_level_name)
+
+if target_level is None:
+    fallback_name = choose_existing_level_name(level_map.keys(), LEVEL_NAME)
+    target_level = level_map.get(fallback_name) if fallback_name else None
+
+if target_level is None:
+    raise Exception(
+        "No Existing Conditions view/level found.\n"
+        "Open '1.0 EXISTING CONDITIONS - GROUND' and run again.\n\n"
+        "Available levels:\n{}\n\nAvailable views:\n{}".format(
+            "\n".join("  " + name for name in sorted(level_map.keys())),
+            "\n".join(
+                "  {}  (level {})".format(v, l)
+                for v, l in sorted(view_records)
+            ),
+        )
+    )
 
 if target_view is not None and EXISTING_ONLY and is_proposed_scope(target_view.Name):
     target_view = None
 
+if (
+    EXISTING_ONLY
+    and is_proposed_scope(target_level.Name)
+    and (target_view is None or classify_revit_name(target_view.Name) != "existing")
+):
+    raise Exception(
+        "Refusing to place on '{}'. Existing-only tracing is enabled.\n"
+        "Open the Existing Conditions view and run again.".format(target_level.Name)
+    )
+
+view_listing = [
+    "    {}  → level '{}'".format(v, l) for v, l in sorted(view_records)
+]
 level_override_info = (
-    "Existing only. Level='{}'. View='{}'".format(
+    "Existing only. View='{}' on level='{}' ({})".format(
+        target_view.Name if target_view is not None else "none",
         target_level.Name,
-        target_view.Name if target_view is not None else "none (no Existing view)",
+        placement_reason,
     )
 )
 
@@ -990,7 +1071,12 @@ else:
                     pass
             if lv_param is not None:
                 try:
-                    if lv_param.AsElementId() != target_level.Id:
+                    hosted_id = lv_param.AsElementId()
+                    allowed_ids = [target_level.Id]
+                    ground = level_map.get("00-GROUND")
+                    if ground is not None:
+                        allowed_ids.append(ground.Id)
+                    if hosted_id not in allowed_ids:
                         continue
                 except Exception:
                     continue
@@ -1087,7 +1173,19 @@ else:
 
             if target_view is not None:
                 try:
+                    cat = instance.Category
+                    if cat is None and symbol is not None:
+                        cat = symbol.Category
+                    if cat is not None:
+                        target_view.SetCategoryHidden(cat.Id, False)
+                except Exception:
+                    pass
+                try:
                     target_view.SetElementOverrides(instance.Id, color_override)
+                except Exception:
+                    pass
+                try:
+                    target_view.UnhideElements([instance.Id])
                 except Exception:
                     pass
 
@@ -1162,8 +1260,12 @@ lines = [
     "",
     "LEVEL",
     "  Existing only        : {}".format(EXISTING_ONLY),
-    "  Level used           : {}".format(target_level.Name),
+    "  Open this view       : {}".format(
+        target_view.Name if target_view is not None else "none"
+    ),
+    "  Host level           : {}".format(target_level.Name),
     "  Elevation            : {:.3f} ft".format(target_level.Elevation),
+    "  Placement reason     : {}".format(placement_reason),
     "  Level note           : {}".format(level_override_info),
     "",
     "PHASE",
@@ -1182,6 +1284,12 @@ lines = [
 ]
 if all_cad_found:
     lines.extend(all_cad_found)
+else:
+    lines.append("    NONE FOUND")
+
+lines.extend(["", "ALL FLOOR PLANS:"])
+if view_listing:
+    lines.extend(view_listing)
 else:
     lines.append("    NONE FOUND")
 

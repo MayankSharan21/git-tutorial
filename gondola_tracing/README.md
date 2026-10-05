@@ -47,10 +47,11 @@ The 5 Oct 2026 run placed **1526 / 1593** items and every family landed at **0°
 - `EXISTING_ONLY = True`: refuses Proposed levels, overlay views, and the selling-floor CAD. Places only on Existing.
 - Prefers the CAD link whose name contains “Existing Conditions”.
 - If the JSON is empty, Dynamo reports the file size and keys and does **not** delete already-placed families.
+- Places on the **Existing Conditions view’s associated level**, not blindly on `00-GROUND`. Floor plans only show families hosted on their own level.
 
 ## How to run
 
-1. Replace both files. The detector banner must print `2026-10-05c-existing-restore`. If it does not, Dynamo is reading an empty or old JSON.
+1. Replace both files. Dynamo must report `2026-10-05d-existing-view`. If it does not, families will land on `00-GROUND` and stay invisible on `1.0 EXISTING CONDITIONS - GROUND`.
 2. Copy only `Gondola_OrientationDetector.py` into the Tracing folder. It is standalone — an old `gondola_lib.py` in that folder is ignored.
 3. Edit `DXF_FILE_PATH` and `OUTPUT_JSON` at the top of `Gondola_OrientationDetector.py`. Use the Existing Conditions GROUND DXF.
 4. `pip install ezdxf` if needed, then run the detector.

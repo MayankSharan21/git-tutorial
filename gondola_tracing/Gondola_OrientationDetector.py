@@ -478,27 +478,75 @@ def choose_existing_level_name(level_names, preferred=""):
     return None
 
 
-def choose_existing_view_name(views, level_name):
+def existing_view_score(view_name, view_level="", preferred_level=""):
+    """
+    Rank floor plans for Existing-only placement.
+
+    Existing Conditions views win even when their associated level is
+    not 00-GROUND (Kmart files often host that view on another 0.000 ft
+    level). Overlay / proposed view names always score 0.
+    """
+    scope = classify_revit_name(view_name)
+    if scope in ("proposed", "overlay"):
+        return 0
+    name = str(view_name or "").lower()
+    score = 0
+    if scope == "existing" and "condition" in name and "ground" in name:
+        score = 100
+    elif scope == "existing" and "condition" in name:
+        score = 90
+    elif scope == "existing" and "ground" in name:
+        score = 70
+    elif scope == "existing":
+        score = 50
+    elif preferred_level and str(view_level) == str(preferred_level):
+        score = 20
+    else:
+        return 0
+    if preferred_level and str(view_level) == str(preferred_level):
+        score += 5
+    return score
+
+
+def choose_existing_view_name(views, level_name=""):
     """
     views: iterable of (view_name, view_level_name)
-    Only Existing views on the chosen Existing level. Never overlay/proposed.
-    """
-    ranked = []
-    for view_name, view_level in views:
-        if str(view_level) != str(level_name):
-            continue
-        scope = classify_revit_name(view_name)
-        if scope in ("proposed", "overlay"):
-            continue
-        ranked.append((scope, str(view_name)))
 
-    for scope, view_name in ranked:
-        if scope == "existing" and "condition" in view_name.lower():
-            return view_name
-    for scope, view_name in ranked:
-        if scope == "existing":
-            return view_name
-    return None
+    Pick the Existing Conditions view first. Do not require it to sit
+    on 00-GROUND. Never returns an overlay or proposed view name.
+    """
+    best_name = None
+    best_score = 0
+    for view_name, view_level in views:
+        score = existing_view_score(view_name, view_level, level_name)
+        if score > best_score:
+            best_score = score
+            best_name = str(view_name)
+    return best_name
+
+
+def choose_existing_placement(views, level_names, preferred_level="", preferred_view=""):
+    """
+    View-first placement.
+
+    Returns (view_name, level_name). The level is the associated level
+    of the Existing Conditions view so families actually appear there.
+    """
+    views = [(str(v), str(l)) for v, l in views if v]
+    if preferred_view:
+        preferred_l = str(preferred_view).strip().lower()
+        for view_name, view_level in views:
+            if view_name.strip().lower() == preferred_l:
+                if classify_revit_name(view_name) not in ("proposed", "overlay"):
+                    return view_name, view_level
+
+    view_name = choose_existing_view_name(views, preferred_level)
+    if view_name:
+        for name, level in views:
+            if name == view_name:
+                return name, level
+
+    return None, choose_existing_level_name(level_names, preferred_level)
 
 
 def layer_bucket(layer):

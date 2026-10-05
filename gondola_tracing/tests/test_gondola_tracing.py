@@ -10,6 +10,7 @@ from gondola_lib import (
     build_gondolas,
     canonical_code,
     choose_existing_level_name,
+    choose_existing_placement,
     choose_existing_view_name,
     classify_revit_name,
     expand_raw_labels,
@@ -132,6 +133,44 @@ class ExistingOnlyScopeTests(unittest.TestCase):
             choose_existing_view_name(views, "00-GROUND"),
             "1-0 EXISTING CONDITIONS - GROUND",
         )
+
+    def test_existing_conditions_view_wins_even_on_other_level(self):
+        # Marrickville: 1.0 EXISTING CONDITIONS - GROUND is not hosted
+        # on 00-GROUND, so placing on 00-GROUND made 1228 families
+        # invisible in the view the user had open.
+        views = [
+            ("5.0 OVERLAY- EXISTING & PROPOSED PLAN", "00-GROUND"),
+            ("2.0 PROPOSED SELLING FLOOR PLAN- GROUND", "2.0 PROPOSED SELLING FLOOR PLAN- GROUND"),
+            ("1.0 EXISTING CONDITIONS - GROUND", "2.0 PROPOSED SELLING FLOOR PLAN- GROUND"),
+        ]
+        levels = [
+            "00-GROUND",
+            "2.0 PROPOSED SELLING FLOOR PLAN- GROUND",
+            "1.0 EXISTING CONDITIONS - GROUND",
+        ]
+        view_name, level_name = choose_existing_placement(
+            views, levels, "00-GROUND"
+        )
+        self.assertEqual(view_name, "1.0 EXISTING CONDITIONS - GROUND")
+        self.assertEqual(level_name, "2.0 PROPOSED SELLING FLOOR PLAN- GROUND")
+        self.assertEqual(
+            choose_existing_view_name(views, "00-GROUND"),
+            "1.0 EXISTING CONDITIONS - GROUND",
+        )
+
+    def test_preferred_existing_view_name(self):
+        views = [
+            ("1.1 EXISTING CONDITIONS - MEZZANINE", "00-MEZZ"),
+            ("1.0 EXISTING CONDITIONS - GROUND", "1.0 EXISTING CONDITIONS - GROUND"),
+        ]
+        view_name, level_name = choose_existing_placement(
+            views,
+            ["00-GROUND", "1.0 EXISTING CONDITIONS - GROUND"],
+            "00-GROUND",
+            "1.0 EXISTING CONDITIONS - GROUND",
+        )
+        self.assertEqual(view_name, "1.0 EXISTING CONDITIONS - GROUND")
+        self.assertEqual(level_name, "1.0 EXISTING CONDITIONS - GROUND")
 
     def test_keeps_proposed_layer_when_it_is_the_only_source(self):
         # Existing Conditions exports often put the real store text on a
