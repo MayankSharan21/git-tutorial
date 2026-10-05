@@ -53,12 +53,12 @@ from RevitServices.Persistence import DocumentManager
 
 JSON_PATH = r"C:\Users\msharan\OneDrive - Kmart Australia Limited\Desktop\Stores Foundry\Tracing\json\gondola_data_Marrickville_New2.json"
 
-# This project does not have a level named 00-GROUND. Host on the
-# Existing Conditions Ground plan the user is looking at.
-# Leave TARGET_VIEW_NAME as a fallback when Dynamo is run from another view.
+# Host ONLY on Existing Conditions Ground. Opening that view is not
+# enough — instances from the last run are still on 2.0 PROPOSED.
 USE_ACTIVE_PLAN_VIEW = True
 TARGET_VIEW_NAME = "1.0 EXISTING CONDITIONS - GROUND"
 LEVEL_NAME = "1.0 EXISTING CONDITIONS - GROUND"
+REFUSE_PROPOSED_HOST = True
 
 # Partial CAD import name. Prefer the existing-conditions link.
 CAD_LINK_NAME = "Existing Conditions"
@@ -992,6 +992,8 @@ def _view_ok(view):
 
 def _name_score(name):
     low = str(name or "").lower()
+    # User typo "Exisiting" still counts.
+    low = low.replace("exisiting", "existing")
     score = 0
     if "overlay" in low:
         score -= 80
@@ -1005,7 +1007,7 @@ def _name_score(name):
         score += 25
     if "ground" in low:
         score += 25
-    if "1.0" in low:
+    if "1.0" in low or "1.0" in low.replace(" ", ""):
         score += 20
     return score
 
@@ -1097,6 +1099,25 @@ level_override_info = "View '{}' via {} | level '{}'".format(
     target_level.Name,
 )
 
+if REFUSE_PROPOSED_HOST:
+    host_bits = " ".join(
+        [
+            str(target_level.Name if target_level else ""),
+            str(target_view.Name if target_view else ""),
+        ]
+    ).lower().replace("exisiting", "existing")
+    if "proposed" in host_bits and "existing" not in host_bits:
+        raise Exception(
+            "Refusing to host on '{}'.\n"
+            "The last run put gondolas on 2.0 PROPOSED, so they are "
+            "invisible in 1.0 EXISTING CONDITIONS - GROUND even though "
+            "that view is open (both levels are at 0.0).\n"
+            "Open 1.0 EXISTING CONDITIONS - GROUND, replace this Python "
+            "node with the latest script, and run Dynamo again.".format(
+                target_level.Name if target_level else "?"
+            )
+        )
+
 
 # ===========================================================================
 # BLUE GRAPHICS / EXISTING PHASE
@@ -1106,6 +1127,7 @@ BLUE = Color(0, 102, 204)
 color_override = OverrideGraphicSettings()
 try:
     color_override.SetProjectionLineColor(BLUE)
+    color_override.SetProjectionLineWeight(6)
 except Exception:
     pass
 try:
@@ -1285,6 +1307,12 @@ for g in gondolas:
             StructuralType.NonStructural
         )
         placed_ids.append(instance.Id)
+        try:
+            lv_param = instance.get_Parameter(BuiltInParameter.FAMILY_LEVEL_PARAM)
+            if lv_param is not None and not lv_param.IsReadOnly:
+                lv_param.Set(target_level.Id)
+        except Exception:
+            pass
 
         if target_view is not None:
             try:
@@ -1359,6 +1387,16 @@ for g in gondolas:
             )
     except Exception as ex:
         skipped.append("ERROR {} :: {}".format(g.get("code", "?"), str(ex)))
+
+if target_view is not None and placed_ids:
+    try:
+        from System.Collections.Generic import List as NetList
+        net_ids = NetList[ElementId]()
+        for eid in placed_ids:
+            net_ids.Add(eid)
+        target_view.UnhideElements(net_ids)
+    except Exception:
+        pass
 
 t.Commit()
 
